@@ -17,6 +17,7 @@ import (
 	"github.com/miekg/dns"
 
 	"safe-road/internal/config"
+	"safe-road/internal/observability"
 	"safe-road/internal/risk"
 	"safe-road/internal/serve"
 )
@@ -29,6 +30,8 @@ type policyResponse struct {
 
 type app struct {
 	risk           *risk.Service
+	metrics        *observability.Registry
+	deploymentTier string
 	upstreamDoHURL string
 	upstreamClient *http.Client
 	blockPageIP    string
@@ -41,6 +44,8 @@ func main() {
 
 	resolver := &app{
 		risk:           risk.NewServiceFromEnv(),
+		metrics:        observability.NewRegistry(),
+		deploymentTier: config.String("SAFE_ROAD_DEPLOYMENT_TIER", "budget-vps"),
 		upstreamDoHURL: config.String("SAFE_ROAD_UPSTREAM_DOH_URL", "https://cloudflare-dns.com/dns-query"),
 		upstreamClient: &http.Client{Timeout: config.DurationMillis("SAFE_ROAD_UPSTREAM_DOH_TIMEOUT_MS", 3*time.Second)},
 		blockPageIP:    config.String("SAFE_ROAD_BLOCK_PAGE_IP", "127.0.0.1"),
@@ -56,12 +61,13 @@ func main() {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/", resolver.statusHandler)
 	mux.HandleFunc("/healthz", healthHandler("dns-resolver"))
+	mux.HandleFunc("/metrics", resolver.metricsHandler)
 	mux.HandleFunc("/v1/policy", resolver.policyHandler)
 	mux.HandleFunc("/dns-query", resolver.dohHandler)
 
 	server := &http.Server{
 		Addr:              addr,
-		Handler:           logRequests(mux),
+		Handler:           logRequests(mux, resolver.metrics),
 		ReadHeaderTimeout: 5 * time.Second,
 		ReadTimeout:       10 * time.Second,
 		WriteTimeout:      10 * time.Second,
@@ -95,11 +101,12 @@ func (a *app) statusHandler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	writeJSON(w, http.StatusOK, map[string]any{
-		"service":      "dns-resolver",
-		"status":       "ok",
-		"mode":         "doh",
-		"upstream_doh": a.upstreamDoHURL,
-		"redis":        a.risk.CacheStatus(r.Context()),
+		"service":         "dns-resolver",
+		"status":          "ok",
+		"mode":            "doh",
+		"deployment_tier": a.deploymentTier,
+		"upstream_doh":    a.upstreamDoHURL,
+		"redis":           a.risk.CacheStatus(r.Context()),
 		"endpoints": []string{
 			"/",
 			"/healthz",
@@ -107,6 +114,20 @@ func (a *app) statusHandler(w http.ResponseWriter, r *http.Request) {
 			"/dns-query",
 		},
 		"time": time.Now().UTC().Format(time.RFC3339Nano),
+	})
+}
+
+func (a *app) metricsHandler(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "method not allowed"})
+		return
+	}
+
+	writeJSON(w, http.StatusOK, map[string]any{
+		"service": "dns-resolver",
+		"status":  "ok",
+		"metrics": a.metrics.Snapshot(),
+		"time":    time.Now().UTC().Format(time.RFC3339Nano),
 	})
 }
 
@@ -269,11 +290,14 @@ func logCacheStatus(service string, riskService *risk.Service) {
 	log.Printf("%s redis cache unavailable at startup, continuing without hard dependency: %s", service, status.Error)
 }
 
-func logRequests(next http.Handler) http.Handler {
+func logRequests(next http.Handler, metrics *observability.Registry) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		started := time.Now()
 		recorder := &statusLoggingResponseWriter{ResponseWriter: w, statusCode: http.StatusOK}
 		next.ServeHTTP(recorder, r)
+		if metrics != nil {
+			metrics.Observe(r.Method, r.URL.Path, recorder.statusCode, recorder.bytesWritten, time.Since(started))
+		}
 		log.Printf("%s %s %d %dB %s", r.Method, r.URL.Path, recorder.statusCode, recorder.bytesWritten, time.Since(started).Truncate(time.Millisecond))
 	})
 }

@@ -2,6 +2,8 @@
 
 > **Lưu ý:** Chỉ tính chi phí vận hành (OPEX). Không bao gồm chi phí phát triển (dev cost) vì bạn tự code bằng AI free.
 > Tỷ giá tham khảo: **1 USD ≈ 25,000 VND** (2026).
+>
+> Cost-sensitive roadmap changes should also follow [docs/specs/opex-cost-optimization/policy.md](specs/opex-cost-optimization/policy.md) and the PR checklist at [.github/pull_request_template.md](../.github/pull_request_template.md).
 
 ---
 

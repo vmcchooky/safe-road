@@ -2,6 +2,9 @@ package risk
 
 import (
 	"context"
+	"encoding/json"
+	"net/http"
+	"net/http/httptest"
 	"testing"
 	"time"
 
@@ -126,6 +129,117 @@ func TestThreatFeedRedisDisabledFailOpen(t *testing.T) {
 	result := service.Analyze(context.Background(), "example.com")
 	if result.Verdict != analysis.VerdictSafe {
 		t.Fatalf("expected lexical safe result when redis is disabled, got %s", result.Verdict)
+	}
+}
+
+func TestLocalAIRefinesSuspiciousDomain(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/v1beta/models/gemini-2.5-flash-lite:generateContent" {
+			t.Fatalf("unexpected path: %s", r.URL.Path)
+		}
+		if got := r.URL.Query().Get("key"); got != "test-key" {
+			t.Fatalf("expected api key in query, got %q", got)
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"candidates": []map[string]any{{
+				"content": map[string]any{
+					"parts": []map[string]string{{"text": `{"verdict":"MALICIOUS","confidence":0.93,"reason":"local ai escalation"}`}},
+				},
+			}},
+		})
+	}))
+	defer server.Close()
+
+	service := NewService(Options{
+		RedisTimeout:  10 * time.Millisecond,
+		TTLAllowed:    time.Hour,
+		TTLSuspicious: time.Hour,
+		TTLBlocked:    time.Hour,
+		RecentLimit:   10,
+		GeminiBaseURL: server.URL + "/v1beta",
+		GeminiAPIKey:  "test-key",
+		GeminiModel:   "gemini-2.5-flash-lite",
+		GeminiTimeout: time.Second,
+	})
+
+	result := service.Analyze(context.Background(), "secure-login-example.com")
+	if result.Verdict != analysis.VerdictMalicious {
+		t.Fatalf("expected local AI escalation to malicious, got %s", result.Verdict)
+	}
+	if result.Score < 85 {
+		t.Fatalf("expected score to be upgraded, got %d", result.Score)
+	}
+}
+
+func TestLocalAIFailureFailsOpen(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{"candidates":[]}`))
+	}))
+	defer server.Close()
+
+	service := NewService(Options{
+		RedisTimeout:  10 * time.Millisecond,
+		TTLAllowed:    time.Hour,
+		TTLSuspicious: time.Hour,
+		TTLBlocked:    time.Hour,
+		RecentLimit:   10,
+		GeminiBaseURL: server.URL + "/v1beta",
+		GeminiAPIKey:  "test-key",
+		GeminiModel:   "gemini-2.5-flash-lite",
+		GeminiTimeout: time.Second,
+	})
+
+	result := service.Analyze(context.Background(), "secure-login-example.com")
+	if result.Verdict != analysis.VerdictSuspicious {
+		t.Fatalf("expected suspicious result to remain unchanged on ai failure, got %s", result.Verdict)
+	}
+}
+
+func TestLocalAIFailureFailsOpenFromEnv(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/v1beta/models/gemini-2.5-flash-lite:generateContent" {
+			t.Fatalf("unexpected path: %s", r.URL.Path)
+		}
+		w.WriteHeader(http.StatusInternalServerError)
+		_, _ = w.Write([]byte(`{"error":{"message":"upstream error"}}`))
+	}))
+	defer server.Close()
+
+	t.Setenv("SAFE_ROAD_REDIS_ADDR", "")
+	t.Setenv("SAFE_ROAD_GEMINI_BASE_URL", server.URL+"/v1beta")
+	t.Setenv("SAFE_ROAD_GEMINI_API_KEY", "test-key")
+	t.Setenv("SAFE_ROAD_GEMINI_MODEL", "gemini-2.5-flash-lite")
+	t.Setenv("SAFE_ROAD_GEMINI_TIMEOUT_MS", "100")
+
+	service := NewServiceFromEnv()
+	result := service.Analyze(context.Background(), "secure-login-example.com")
+	if result.Verdict != analysis.VerdictSuspicious {
+		t.Fatalf("expected suspicious result to remain unchanged on ai error, got %s", result.Verdict)
+	}
+}
+
+func TestLocalAITimeoutFailsOpenFromEnv(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/v1beta/models/gemini-2.5-flash-lite:generateContent" {
+			t.Fatalf("unexpected path: %s", r.URL.Path)
+		}
+		time.Sleep(200 * time.Millisecond)
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{"candidates":[{"content":{"parts":[{"text":"{\"verdict\":\"MALICIOUS\",\"confidence\":0.9,\"reason\":\"late response\"}"}]}}]}`))
+	}))
+	defer server.Close()
+
+	t.Setenv("SAFE_ROAD_REDIS_ADDR", "")
+	t.Setenv("SAFE_ROAD_GEMINI_BASE_URL", server.URL+"/v1beta")
+	t.Setenv("SAFE_ROAD_GEMINI_API_KEY", "test-key")
+	t.Setenv("SAFE_ROAD_GEMINI_MODEL", "gemini-2.5-flash-lite")
+	t.Setenv("SAFE_ROAD_GEMINI_TIMEOUT_MS", "50")
+
+	service := NewServiceFromEnv()
+	result := service.Analyze(context.Background(), "secure-login-example.com")
+	if result.Verdict != analysis.VerdictSuspicious {
+		t.Fatalf("expected suspicious result to remain unchanged on ai timeout, got %s", result.Verdict)
 	}
 }
 

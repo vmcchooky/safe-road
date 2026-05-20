@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"safe-road/internal/config"
+	"safe-road/internal/observability"
 	"safe-road/internal/risk"
 	"safe-road/internal/serve"
 )
@@ -17,23 +18,30 @@ type analyzeRequest struct {
 }
 
 type statusResponse struct {
-	Service   string            `json:"service"`
-	Status    string            `json:"status"`
-	Mode      string            `json:"mode,omitempty"`
-	Redis     *risk.CacheStatus `json:"redis,omitempty"`
-	Endpoints []string          `json:"endpoints,omitempty"`
-	Time      string            `json:"time"`
+	Service        string            `json:"service"`
+	Status         string            `json:"status"`
+	Mode           string            `json:"mode,omitempty"`
+	DeploymentTier string            `json:"deployment_tier,omitempty"`
+	Redis          *risk.CacheStatus `json:"redis,omitempty"`
+	Endpoints      []string          `json:"endpoints,omitempty"`
+	Time           string            `json:"time"`
 }
 
 type app struct {
-	risk *risk.Service
+	risk           *risk.Service
+	metrics        *observability.Registry
+	deploymentTier string
 }
 
 func main() {
 	addr := config.String("SAFE_ROAD_CORE_API_ADDR", ":8080")
 	shutdownTimeout := config.DurationMillis("SAFE_ROAD_SHUTDOWN_TIMEOUT_MS", 10*time.Second)
 
-	api := &app{risk: risk.NewServiceFromEnv()}
+	api := &app{
+		risk:           risk.NewServiceFromEnv(),
+		metrics:        observability.NewRegistry(),
+		deploymentTier: config.String("SAFE_ROAD_DEPLOYMENT_TIER", "budget-vps"),
+	}
 	defer func() {
 		if err := api.risk.Close(); err != nil {
 			log.Printf("risk service close failed: %v", err)
@@ -46,6 +54,7 @@ func main() {
 	mux.HandleFunc("/healthz", healthHandler("core-api"))
 	mux.HandleFunc("/readyz", healthHandler("core-api"))
 	mux.HandleFunc("/v1/version", versionHandler)
+	mux.HandleFunc("/metrics", api.metricsHandler)
 	mux.HandleFunc("/v1/analyze", api.analyzeHandler)
 	mux.HandleFunc("/v1/analysis/recent", api.recentAnalysisHandler)
 	mux.HandleFunc("/dashboard", dashboardHandler)
@@ -53,7 +62,7 @@ func main() {
 
 	server := &http.Server{
 		Addr:              addr,
-		Handler:           logRequests(mux),
+		Handler:           logRequests(mux, api.metrics),
 		ReadHeaderTimeout: 5 * time.Second,
 		ReadTimeout:       10 * time.Second,
 		WriteTimeout:      10 * time.Second,
@@ -88,10 +97,11 @@ func (a *app) statusHandler(w http.ResponseWriter, r *http.Request) {
 
 	cacheStatus := a.risk.CacheStatus(r.Context())
 	writeJSON(w, http.StatusOK, statusResponse{
-		Service: "core-api",
-		Status:  "ok",
-		Mode:    "api",
-		Redis:   &cacheStatus,
+		Service:        "core-api",
+		Status:         "ok",
+		Mode:           "api",
+		DeploymentTier: a.deploymentTier,
+		Redis:          &cacheStatus,
 		Endpoints: []string{
 			"/",
 			"/healthz",
@@ -102,6 +112,20 @@ func (a *app) statusHandler(w http.ResponseWriter, r *http.Request) {
 			"/dashboard",
 		},
 		Time: time.Now().UTC().Format(time.RFC3339Nano),
+	})
+}
+
+func (a *app) metricsHandler(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+
+	writeJSON(w, http.StatusOK, map[string]any{
+		"service": "core-api",
+		"status":  "ok",
+		"metrics": a.metrics.Snapshot(),
+		"time":    time.Now().UTC().Format(time.RFC3339Nano),
 	})
 }
 
@@ -159,11 +183,14 @@ func logCacheStatus(service string, riskService *risk.Service) {
 	log.Printf("%s redis cache unavailable at startup, continuing without hard dependency: %s", service, status.Error)
 }
 
-func logRequests(next http.Handler) http.Handler {
+func logRequests(next http.Handler, metrics *observability.Registry) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		started := time.Now()
 		recorder := &statusLoggingResponseWriter{ResponseWriter: w, statusCode: http.StatusOK}
 		next.ServeHTTP(recorder, r)
+		if metrics != nil {
+			metrics.Observe(r.Method, r.URL.Path, recorder.statusCode, recorder.bytesWritten, time.Since(started))
+		}
 		log.Printf("%s %s %d %dB %s", r.Method, r.URL.Path, recorder.statusCode, recorder.bytesWritten, time.Since(started).Truncate(time.Millisecond))
 	})
 }

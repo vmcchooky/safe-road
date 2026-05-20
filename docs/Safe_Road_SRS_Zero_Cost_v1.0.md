@@ -1,6 +1,8 @@
 # Software Requirements Specification (SRS)
 ## Safe Road — Anti-Phishing System | ZERO-COST EDITION
 
+> **DEPRECATED:** This document is kept for historical reference only. The current roadmap is OPEX-first and lives in [docs/Safe_Road_OPEX_Estimate.md](../Safe_Road_OPEX_Estimate.md) and [docs/specs/opex-cost-optimization](specs/opex-cost-optimization).
+
 **Version:** 1.0-ZC  
 **Date:** 2026-05-18  
 **Status:** Draft for Community Deployment (Zero Monthly Cost)  

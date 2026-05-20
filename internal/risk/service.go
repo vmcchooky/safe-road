@@ -9,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	"safe-road/internal/ai"
 	"safe-road/internal/analysis"
 	"safe-road/internal/cache"
 )
@@ -25,6 +26,10 @@ type Options struct {
 	TTLBlocked    time.Duration
 	RecentLimit   int64
 	ThreatFeedKey string
+	GeminiBaseURL string
+	GeminiAPIKey  string
+	GeminiModel   string
+	GeminiTimeout time.Duration
 }
 
 type Service struct {
@@ -35,6 +40,7 @@ type Service struct {
 	ttlBlocked    time.Duration
 	recentLimit   int64
 	threatFeedKey string
+	ai            *ai.Client
 }
 
 type Analysis struct {
@@ -65,6 +71,10 @@ func NewService(options Options) *Service {
 	if threatFeedKey == "" {
 		threatFeedKey = defaultThreatFeedKey
 	}
+	aiClient := ai.New(options.GeminiBaseURL, options.GeminiAPIKey, options.GeminiModel, options.GeminiTimeout)
+	if !aiClient.Enabled() {
+		aiClient = nil
+	}
 
 	return &Service{
 		redis:         options.Redis,
@@ -74,6 +84,7 @@ func NewService(options Options) *Service {
 		ttlBlocked:    options.TTLBlocked,
 		recentLimit:   recentLimit,
 		threatFeedKey: threatFeedKey,
+		ai:            aiClient,
 	}
 }
 
@@ -188,6 +199,7 @@ func (s *Service) analyze(ctx context.Context, domain string) (analysis.Result, 
 	if result.Domain == "" {
 		result = analysis.Analyze(normalized)
 	}
+	result = s.refineWithAI(ctx, result)
 	err = s.withRedis(ctx, func(redisCtx context.Context) error {
 		return s.redis.SetJSON(redisCtx, cacheKey, result, s.ttlFor(result.Verdict))
 	})
@@ -217,6 +229,37 @@ func (s *Service) feedResult(ctx context.Context, domain string) analysis.Result
 		Score:      100,
 		Reasons:    []string{threatFeedReason},
 	}
+}
+
+func (s *Service) refineWithAI(ctx context.Context, current analysis.Result) analysis.Result {
+	if s == nil || s.ai == nil {
+		return current
+	}
+	if current.Verdict != analysis.VerdictSuspicious {
+		return current
+	}
+
+	aiResult, err := s.ai.Refine(ctx, current.Domain, current)
+	if err != nil {
+		log.Printf("local AI refinement failed for %s: %v", current.Domain, err)
+		return current
+	}
+	if aiResult.Verdict != analysis.VerdictMalicious {
+		if len(aiResult.Reasons) > 0 {
+			current.Reasons = append(current.Reasons, aiResult.Reasons...)
+		}
+		return current
+	}
+
+	current.Verdict = analysis.VerdictMalicious
+	if aiResult.Score > current.Score {
+		current.Score = aiResult.Score
+	}
+	if aiResult.Confidence > current.Confidence {
+		current.Confidence = aiResult.Confidence
+	}
+	current.Reasons = append(current.Reasons, aiResult.Reasons...)
+	return current
 }
 
 func (s *Service) matchThreatFeed(parent context.Context, domain string) (bool, error) {

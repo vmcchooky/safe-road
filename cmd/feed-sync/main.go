@@ -14,7 +14,6 @@ import (
 	"strings"
 	"time"
 
-	"safe-road/internal/cache"
 	"safe-road/internal/config"
 	"safe-road/internal/feed"
 )
@@ -37,7 +36,7 @@ func main() {
 	redisAddr := flag.String("redis-addr", config.String("SAFE_ROAD_REDIS_ADDR", ""), "Redis address")
 	redisPassword := flag.String("redis-password", config.String("SAFE_ROAD_REDIS_PASSWORD", ""), "Redis password")
 	redisDB := flag.Int("redis-db", config.Int("SAFE_ROAD_REDIS_DB", 0), "Redis database")
-	key := flag.String("key", config.String("SAFE_ROAD_THREAT_FEED_KEY", defaultThreatFeedKey), "Redis Set key for threat feed")
+	key := flag.String("key", config.String("SAFE_ROAD_THREAT_FEED_KEY", feed.DefaultThreatFeedKey), "Redis Set key for threat feed")
 	dryRun := flag.Bool("dry-run", false, "parse feed and report counts without writing Redis")
 	replace := flag.Bool("replace", true, "delete the target set before writing parsed domains")
 	timeout := flag.Duration("timeout", config.DurationMillis("SAFE_ROAD_FEED_SYNC_TIMEOUT_MS", 30*time.Second), "feed read and Redis write timeout")
@@ -47,53 +46,18 @@ func main() {
 		log.Fatal("feed source is required through -source or SAFE_ROAD_THREAT_FEED_SOURCE")
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), *timeout)
-	defer cancel()
-
-	reader, closeReader, err := openSource(ctx, *source)
+	report, err := feed.Sync(context.Background(), feed.SyncOptions{
+		Source:        *source,
+		RedisAddr:     *redisAddr,
+		RedisPassword: *redisPassword,
+		RedisDB:       *redisDB,
+		Key:           *key,
+		DryRun:        *dryRun,
+		Replace:       *replace,
+		Timeout:       *timeout,
+	})
 	if err != nil {
 		log.Fatal(err)
-	}
-	defer closeReader()
-
-	parsed, err := feed.Parse(reader)
-	if err != nil {
-		log.Fatal(err)
-	}
-
-	report := syncReport{
-		Source:     *source,
-		Key:        *key,
-		DryRun:     *dryRun,
-		Replace:    *replace,
-		Stats:      parsed.Stats,
-		FinishedAt: time.Now().UTC().Format(time.RFC3339Nano),
-	}
-
-	if !*dryRun {
-		if strings.TrimSpace(*redisAddr) == "" {
-			log.Fatal("redis address is required unless -dry-run is set")
-		}
-
-		redisCache := cache.NewRedis(*redisAddr, *redisPassword, *redisDB)
-		defer func() {
-			if err := redisCache.Close(); err != nil {
-				log.Printf("redis close failed: %v", err)
-			}
-		}()
-
-		if *replace {
-			if err := redisCache.Delete(ctx, *key); err != nil {
-				log.Fatal(err)
-			}
-		}
-
-		written, err := redisCache.SetAdd(ctx, *key, parsed.Domains...)
-		if err != nil {
-			log.Fatal(err)
-		}
-		report.Written = written
-		report.RedisAddr = *redisAddr
 	}
 
 	encoded, err := json.MarshalIndent(report, "", "  ")

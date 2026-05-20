@@ -1,0 +1,65 @@
+package ai
+
+import (
+	"context"
+	"encoding/json"
+	"net/http"
+	"net/http/httptest"
+	"strings"
+	"testing"
+	"time"
+
+	"safe-road/internal/analysis"
+)
+
+func TestRefineParsesMaliciousResponse(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/v1beta/models/gemini-2.5-flash-lite:generateContent" {
+			t.Fatalf("unexpected path: %s", r.URL.Path)
+		}
+		if got := r.URL.Query().Get("key"); got != "test-key" {
+			t.Fatalf("expected api key in query, got %q", got)
+		}
+		var req generateRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			t.Fatal(err)
+		}
+		if len(req.Contents) != 1 || len(req.Contents[0].Parts) != 1 {
+			t.Fatalf("unexpected request contents: %#v", req.Contents)
+		}
+		if !strings.Contains(req.Contents[0].Parts[0].Text, "secure-login-example.com") {
+			t.Fatalf("expected domain in prompt, got %q", req.Contents[0].Parts[0].Text)
+		}
+		_, _ = w.Write([]byte(`{"candidates":[{"content":{"parts":[{"text":"{\"verdict\":\"MALICIOUS\",\"confidence\":0.91,\"reason\":\"high risk pattern\"}"}]}}]}`))
+	}))
+	defer server.Close()
+
+	client := New(server.URL+"/v1beta", "test-key", "gemini-2.5-flash-lite", time.Second)
+	current := analysis.Result{Domain: "secure-login-example.com", Verdict: analysis.VerdictSuspicious, Confidence: 0.52, Score: 45}
+	result, err := client.Refine(context.Background(), current.Domain, current)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if result.Verdict != analysis.VerdictMalicious {
+		t.Fatalf("expected malicious verdict, got %s", result.Verdict)
+	}
+	if result.Confidence != 0.91 {
+		t.Fatalf("expected confidence 0.91, got %.2f", result.Confidence)
+	}
+	if len(result.Reasons) != 1 || result.Reasons[0] != "local ai classification: high risk pattern" {
+		t.Fatalf("unexpected reasons: %#v", result.Reasons)
+	}
+}
+
+func TestRefineDisabled(t *testing.T) {
+	client := New("", "", "", time.Second)
+	if client.Enabled() {
+		t.Fatal("expected disabled client")
+	}
+
+	_, err := client.Refine(context.Background(), "example.com", analysis.Result{})
+	if err == nil {
+		t.Fatal("expected disabled client error")
+	}
+}
