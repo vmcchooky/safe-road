@@ -1,0 +1,72 @@
+services:
+  redis:
+    image: redis:7-alpine
+    command: redis-server --appendonly yes --maxmemory ${SAFE_ROAD_REDIS_MAXMEMORY:-256mb} --maxmemory-policy allkeys-lru
+    volumes:
+      - redis-data:/data
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "redis-cli ping | grep PONG"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+
+  core-api:
+    build:
+      context: .
+      args:
+        SERVICE: core-api
+    environment:
+      SAFE_ROAD_CORE_API_ADDR: ${SAFE_ROAD_CORE_API_ADDR:-:8080}
+      SAFE_ROAD_REDIS_ADDR: ${SAFE_ROAD_REDIS_ADDR:-redis:6379}
+      SAFE_ROAD_REDIS_PASSWORD: ${SAFE_ROAD_REDIS_PASSWORD:-}
+      SAFE_ROAD_REDIS_DB: ${SAFE_ROAD_REDIS_DB:-0}
+      SAFE_ROAD_REDIS_TIMEOUT_MS: ${SAFE_ROAD_REDIS_TIMEOUT_MS:-250}
+      SAFE_ROAD_THREAT_FEED_KEY: ${SAFE_ROAD_THREAT_FEED_KEY:-safe-road:threat:feed}
+      SAFE_ROAD_CACHE_TTL_ALLOWED_SECONDS: ${SAFE_ROAD_CACHE_TTL_ALLOWED_SECONDS:-10800}
+      SAFE_ROAD_CACHE_TTL_SUSPICIOUS_SECONDS: ${SAFE_ROAD_CACHE_TTL_SUSPICIOUS_SECONDS:-3600}
+      SAFE_ROAD_CACHE_TTL_BLOCKED_SECONDS: ${SAFE_ROAD_CACHE_TTL_BLOCKED_SECONDS:-21600}
+      SAFE_ROAD_DASHBOARD_RECENT_LIMIT: ${SAFE_ROAD_DASHBOARD_RECENT_LIMIT:-25}
+    ports:
+      - "8080:8080"
+    depends_on:
+      - redis
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:8080/healthz >/dev/null 2>&1"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+
+  dns-resolver:
+    build:
+      context: .
+      args:
+        SERVICE: dns-resolver
+    environment:
+      SAFE_ROAD_DNS_RESOLVER_ADDR: ${SAFE_ROAD_DNS_RESOLVER_ADDR:-:8081}
+      SAFE_ROAD_REDIS_ADDR: ${SAFE_ROAD_REDIS_ADDR:-redis:6379}
+      SAFE_ROAD_REDIS_PASSWORD: ${SAFE_ROAD_REDIS_PASSWORD:-}
+      SAFE_ROAD_REDIS_DB: ${SAFE_ROAD_REDIS_DB:-0}
+      SAFE_ROAD_REDIS_TIMEOUT_MS: ${SAFE_ROAD_REDIS_TIMEOUT_MS:-250}
+      SAFE_ROAD_THREAT_FEED_KEY: ${SAFE_ROAD_THREAT_FEED_KEY:-safe-road:threat:feed}
+      SAFE_ROAD_CACHE_TTL_ALLOWED_SECONDS: ${SAFE_ROAD_CACHE_TTL_ALLOWED_SECONDS:-10800}
+      SAFE_ROAD_CACHE_TTL_SUSPICIOUS_SECONDS: ${SAFE_ROAD_CACHE_TTL_SUSPICIOUS_SECONDS:-3600}
+      SAFE_ROAD_CACHE_TTL_BLOCKED_SECONDS: ${SAFE_ROAD_CACHE_TTL_BLOCKED_SECONDS:-21600}
+      SAFE_ROAD_UPSTREAM_DOH_URL: ${SAFE_ROAD_UPSTREAM_DOH_URL:-https://cloudflare-dns.com/dns-query}
+      SAFE_ROAD_UPSTREAM_DOH_TIMEOUT_MS: ${SAFE_ROAD_UPSTREAM_DOH_TIMEOUT_MS:-3000}
+      SAFE_ROAD_BLOCK_PAGE_IP: ${SAFE_ROAD_BLOCK_PAGE_IP:-127.0.0.1}
+      SAFE_ROAD_DNS_BLOCK_TTL_SECONDS: ${SAFE_ROAD_DNS_BLOCK_TTL_SECONDS:-60}
+    ports:
+      - "8081:8081"
+    depends_on:
+      - redis
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:8081/healthz >/dev/null 2>&1"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+
+volumes:
+  redis-data:
