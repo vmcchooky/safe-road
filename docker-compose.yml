@@ -1,4 +1,22 @@
 services:
+  caddy:
+    profiles: ["production-edge"]
+    image: caddy:2-alpine
+    environment:
+      SAFE_ROAD_PUBLIC_HOST: ${SAFE_ROAD_PUBLIC_HOST:-localhost}
+      SAFE_ROAD_CADDY_EMAIL: ${SAFE_ROAD_CADDY_EMAIL:-}
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy-data:/data
+      - caddy-config:/config
+    depends_on:
+      - core-api
+      - dns-resolver
+    restart: unless-stopped
+
   redis:
     image: redis:7-alpine
     command: redis-server --appendonly yes --maxmemory ${SAFE_ROAD_REDIS_MAXMEMORY:-256mb} --maxmemory-policy allkeys-lru
@@ -17,7 +35,7 @@ services:
       args:
         SERVICE: core-api
     environment:
-      SAFE_ROAD_HEALTHCHECK_PORT: ${SAFE_ROAD_HEALTHCHECK_PORT:-8080}
+      SAFE_ROAD_HEALTHCHECK_PORT: "8080"
       SAFE_ROAD_HEALTHCHECK_PATH: ${SAFE_ROAD_HEALTHCHECK_PATH:-/healthz}
       SAFE_ROAD_CORE_API_ADDR: ${SAFE_ROAD_CORE_API_ADDR:-:8080}
       SAFE_ROAD_REDIS_ADDR: ${SAFE_ROAD_REDIS_ADDR:-redis:6379}
@@ -45,7 +63,7 @@ services:
       args:
         SERVICE: dns-resolver
     environment:
-      SAFE_ROAD_HEALTHCHECK_PORT: ${SAFE_ROAD_HEALTHCHECK_PORT:-8081}
+      SAFE_ROAD_HEALTHCHECK_PORT: "8081"
       SAFE_ROAD_HEALTHCHECK_PATH: ${SAFE_ROAD_HEALTHCHECK_PATH:-/healthz}
       SAFE_ROAD_DNS_RESOLVER_ADDR: ${SAFE_ROAD_DNS_RESOLVER_ADDR:-:8081}
       SAFE_ROAD_REDIS_ADDR: ${SAFE_ROAD_REDIS_ADDR:-redis:6379}
@@ -63,7 +81,7 @@ services:
       SAFE_ROAD_SQLITE_PATH: ${SAFE_ROAD_SQLITE_PATH:-/app/data/safe-road.db}
       SAFE_ROAD_TELEMETRY_RETENTION_DAYS: ${SAFE_ROAD_TELEMETRY_RETENTION_DAYS:-30}
       SAFE_ROAD_DNS_DOT_ENABLED: ${SAFE_ROAD_DNS_DOT_ENABLED:-true}
-      SAFE_ROAD_DNS_DOT_ADDR: ${SAFE_ROAD_DNS_DOT_ADDR:-:853}
+      SAFE_ROAD_DNS_DOT_ADDR: :${SAFE_ROAD_DNS_DOT_CONTAINER_PORT:-8533}
       SAFE_ROAD_DNS_DOT_CERT_FILE: ${SAFE_ROAD_DNS_DOT_CERT_FILE:-}
       SAFE_ROAD_DNS_DOT_KEY_FILE: ${SAFE_ROAD_DNS_DOT_KEY_FILE:-}
       SAFE_ROAD_RATELIMIT_DOT_RPM: ${SAFE_ROAD_RATELIMIT_DOT_RPM:-100}
@@ -72,7 +90,7 @@ services:
       - app-data:/app/data
     ports:
       - "8081:8081"
-      - "853:853"
+      - "${SAFE_ROAD_DNS_DOT_PUBLISHED_PORT:-853}:${SAFE_ROAD_DNS_DOT_CONTAINER_PORT:-8533}"
     depends_on:
       - redis
     restart: unless-stopped
@@ -95,6 +113,25 @@ services:
       - redis
     restart: unless-stopped
 
+  feed-sync:
+    profiles: ["feed-sync"]
+    build:
+      context: .
+      args:
+        SERVICE: feed-sync
+    environment:
+      SAFE_ROAD_THREAT_FEED_SOURCE: ${SAFE_ROAD_THREAT_FEED_SOURCE:-}
+      SAFE_ROAD_THREAT_FEED_KEY: ${SAFE_ROAD_THREAT_FEED_KEY:-safe-road:threat:feed}
+      SAFE_ROAD_REDIS_ADDR: ${SAFE_ROAD_REDIS_ADDR:-redis:6379}
+      SAFE_ROAD_REDIS_PASSWORD: ${SAFE_ROAD_REDIS_PASSWORD:-}
+      SAFE_ROAD_REDIS_DB: ${SAFE_ROAD_REDIS_DB:-0}
+      SAFE_ROAD_FEED_SYNC_TIMEOUT_MS: ${SAFE_ROAD_FEED_SYNC_TIMEOUT_MS:-30000}
+    depends_on:
+      - redis
+    restart: "no"
+
 volumes:
   redis-data:
   app-data:
+  caddy-data:
+  caddy-config:

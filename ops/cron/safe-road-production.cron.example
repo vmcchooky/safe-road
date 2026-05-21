@@ -1,0 +1,6 @@
+# Safe Road production cron examples.
+# Install with: crontab ops/cron/safe-road-production.cron.example
+
+*/5 * * * * cd /opt/safe-road && . ./.env && scripts/duckdns-update.sh >> logs/duckdns.log 2>&1
+30 * * * * cd /opt/safe-road && . ./.env && scripts/safe-road.sh feed-sync >> logs/feed-sync.log 2>&1
+15 3 * * * cd /opt/safe-road && . ./.env && scripts/safe-road.sh backup >> logs/backup.log 2>&1

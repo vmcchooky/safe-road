@@ -1,0 +1,14 @@
+{$SAFE_ROAD_PUBLIC_HOST:localhost} {
+	encode zstd gzip
+
+	header {
+		Strict-Transport-Security "max-age=31536000; includeSubDomains; preload"
+		X-Content-Type-Options "nosniff"
+		Referrer-Policy "no-referrer"
+	}
+
+	@doh path /dns-query
+	reverse_proxy @doh dns-resolver:8081
+
+	reverse_proxy core-api:8080
+}
