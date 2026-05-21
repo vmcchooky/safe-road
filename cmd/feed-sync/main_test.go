@@ -4,9 +4,10 @@ import (
 	"bytes"
 	"compress/gzip"
 	"context"
-	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"testing"
 
 	"safe-road/internal/feed"
@@ -22,7 +23,7 @@ func TestOpenSourceHandlesGzipHTTP(t *testing.T) {
 	}))
 	defer server.Close()
 
-	reader, closeReader, err := openSource(context.Background(), server.URL)
+	reader, closeReader, err := feed.OpenSource(context.Background(), server.URL, server.Client())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -49,7 +50,12 @@ func TestWrapMaybeCompressedReadCloserWithGzipSuffix(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	reader, closeReader, err := wrapMaybeCompressedReadCloser(io.NopCloser(bytes.NewReader(buf.Bytes())), "feed.txt.gz", "")
+	path := filepath.Join(t.TempDir(), "feed.txt.gz")
+	if err := os.WriteFile(path, buf.Bytes(), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	reader, closeReader, err := feed.OpenSource(context.Background(), path, nil)
 	if err != nil {
 		t.Fatal(err)
 	}

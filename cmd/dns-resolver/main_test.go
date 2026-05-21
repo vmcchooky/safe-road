@@ -1,19 +1,29 @@
 package main
 
 import (
+	"crypto/tls"
 	"encoding/json"
+	"fmt"
+	"net"
 	"net/http"
 	"net/http/httptest"
+	"path/filepath"
+	"sync"
 	"testing"
 	"time"
 
+	"github.com/miekg/dns"
+
+	"safe-road/internal/config"
 	"safe-road/internal/observability"
+	"safe-road/internal/ratelimit"
 	"safe-road/internal/risk"
+	"safe-road/internal/store"
 )
 
 func TestStatusHandlerRoot(t *testing.T) {
 	app := &app{
-		risk:           risk.NewService(risk.Options{RedisTimeout: 10 * time.Millisecond}),
+		risk:           risk.NewService(risk.Options{AnalysisConfig: config.DefaultAnalysisConfig(), RedisTimeout: 10 * time.Millisecond}),
 		metrics:        observability.NewRegistry(),
 		deploymentTier: "budget-vps",
 		upstreamDoHURL: "https://cloudflare-dns.com/dns-query",
@@ -72,7 +82,7 @@ func TestStatusHandlerRoot(t *testing.T) {
 }
 
 func TestStatusHandlerRejectsNonRootPath(t *testing.T) {
-	app := &app{risk: risk.NewService(risk.Options{RedisTimeout: 10 * time.Millisecond}), metrics: observability.NewRegistry(), deploymentTier: "budget-vps"}
+	app := &app{risk: risk.NewService(risk.Options{AnalysisConfig: config.DefaultAnalysisConfig(), RedisTimeout: 10 * time.Millisecond}), metrics: observability.NewRegistry(), deploymentTier: "budget-vps"}
 	defer func() {
 		if err := app.risk.Close(); err != nil {
 			t.Fatal(err)
@@ -90,7 +100,7 @@ func TestStatusHandlerRejectsNonRootPath(t *testing.T) {
 }
 
 func TestMetricsHandlerRoot(t *testing.T) {
-	app := &app{risk: risk.NewService(risk.Options{RedisTimeout: 10 * time.Millisecond}), metrics: observability.NewRegistry(), deploymentTier: "budget-vps"}
+	app := &app{risk: risk.NewService(risk.Options{AnalysisConfig: config.DefaultAnalysisConfig(), RedisTimeout: 10 * time.Millisecond}), metrics: observability.NewRegistry(), deploymentTier: "budget-vps"}
 	defer func() {
 		if err := app.risk.Close(); err != nil {
 			t.Fatal(err)
@@ -127,3 +137,495 @@ func TestMetricsHandlerRoot(t *testing.T) {
 		t.Fatalf("expected request_summary map, got %#v", metrics["request_summary"])
 	}
 }
+
+func TestResolverClientGroupPolicy(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "test-resolver.db")
+	storeDB, err := store.New(dbPath, 30)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	app := &app{
+		risk: risk.NewService(risk.Options{
+			AnalysisConfig: config.DefaultAnalysisConfig(),
+			RedisTimeout:   10 * time.Millisecond,
+			Store:          storeDB,
+		}),
+		metrics:        observability.NewRegistry(),
+		deploymentTier: "budget-vps",
+		upstreamDoHURL: "https://cloudflare-dns.com/dns-query",
+	}
+	defer func() {
+		_ = app.risk.Close()
+	}()
+
+	// Setup a group that blocks adult content
+	db := app.risk.StoreDB()
+	adultGroupID, err := db.CreateGroup("adult-blocker", "Blocks adult content", []string{"adult"}, false, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Map IP "192.168.2.10" to this group
+	if _, err := db.AddMappingInt("ip", "192.168.2.10", adultGroupID); err != nil {
+		t.Fatal(err)
+	}
+
+	// Case 1: Client with IP 192.168.2.10 queries policy for xvideos.porn
+	recorder := httptest.NewRecorder()
+	request := httptest.NewRequest(http.MethodGet, "/v1/policy?domain=xvideos.porn", nil)
+	request.Header.Set("X-Forwarded-For", "192.168.2.10")
+
+	app.policyHandler(recorder, request)
+
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", recorder.Code)
+	}
+
+	var payload policyResponse
+	if err := json.NewDecoder(recorder.Body).Decode(&payload); err != nil {
+		t.Fatal(err)
+	}
+
+	if payload.Policy.Policy != "block" {
+		t.Fatalf("expected block policy, got %s", payload.Policy.Policy)
+	}
+	if payload.Policy.Result.Category != "adult" {
+		t.Fatalf("expected category adult, got %s", payload.Policy.Result.Category)
+	}
+
+	// Case 2: Client with IP 192.168.2.20 (defaults to default group) queries policy for xvideos.porn
+	recorderDefault := httptest.NewRecorder()
+	requestDefault := httptest.NewRequest(http.MethodGet, "/v1/policy?domain=xvideos.porn", nil)
+	requestDefault.Header.Set("X-Forwarded-For", "192.168.2.20")
+
+	app.policyHandler(recorderDefault, requestDefault)
+
+	var payloadDefault policyResponse
+	if err := json.NewDecoder(recorderDefault.Body).Decode(&payloadDefault); err != nil {
+		t.Fatal(err)
+	}
+
+	if payloadDefault.Policy.Policy != "allow" {
+		t.Fatalf("expected allow policy for default group client, got %s", payloadDefault.Policy.Policy)
+	}
+}
+
+func TestGenerateSelfSignedCert(t *testing.T) {
+	cert, err := generateSelfSignedCert()
+	if err != nil {
+		t.Fatalf("failed to generate self-signed cert: %v", err)
+	}
+	if len(cert.Certificate) == 0 {
+		t.Fatal("expected at least one certificate in the chain")
+	}
+	if cert.PrivateKey == nil {
+		t.Fatal("expected private key to be set")
+	}
+}
+
+func TestDoTHandlerBasic(t *testing.T) {
+	// 1. Mock Upstream DoH HTTP Server
+	mockUpstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		wire, err := readDNSMessage(w, r)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+
+		query := new(dns.Msg)
+		if err := query.Unpack(wire); err != nil {
+			http.Error(w, "invalid dns msg", http.StatusBadRequest)
+			return
+		}
+
+		resp := new(dns.Msg)
+		resp.SetReply(query)
+		if len(query.Question) > 0 {
+			resp.Answer = append(resp.Answer, &dns.A{
+				Hdr: dns.RR_Header{Name: query.Question[0].Name, Rrtype: dns.TypeA, Class: dns.ClassINET, Ttl: 60},
+				A:   net.ParseIP("93.184.216.34"),
+			})
+		}
+
+		respWire, _ := resp.Pack()
+		w.Header().Set("Content-Type", "application/dns-message")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write(respWire)
+	}))
+	defer mockUpstream.Close()
+
+	// 2. Setup SQLite DB Store with explicit policies
+	dbPath := filepath.Join(t.TempDir(), "test-dot.db")
+	storeDB, err := store.New(dbPath, 30)
+	if err != nil {
+		t.Fatal(err)
+	}
+	
+	// Create threat override for adult content / block
+	_, err = storeDB.CreateGroup("malicious-blocker", "Blocks malicious sites", []string{"malicious"}, false, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	
+	// Add mock override for a bad domain
+	err = storeDB.UpsertOverride("bocongan-verify.xyz", "block", "Mock malicious site")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	app := &app{
+		risk: risk.NewService(risk.Options{
+			AnalysisConfig: config.DefaultAnalysisConfig(),
+			RedisTimeout:   10 * time.Millisecond,
+			Store:          storeDB,
+		}),
+		metrics:        observability.NewRegistry(),
+		deploymentTier: "budget-vps",
+		upstreamDoHURL: mockUpstream.URL,
+		upstreamClient: mockUpstream.Client(),
+		blockPageIP:    "127.0.0.1",
+		dnsTTL:         60,
+	}
+	defer func() {
+		_ = app.risk.Close()
+	}()
+
+	// 3. Start DoT server locally on random port via tls.Listener
+	selfCert, err := generateSelfSignedCert()
+	if err != nil {
+		t.Fatal(err)
+	}
+	tlsConfig := &tls.Config{
+		Certificates: []tls.Certificate{selfCert},
+	}
+
+	l, err := tls.Listen("tcp", "127.0.0.1:0", tlsConfig)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer l.Close()
+
+	dotServer := &dns.Server{
+		Listener: l,
+		Net:      "tcp-tls",
+		Handler:  dns.HandlerFunc(app.dotHandler),
+	}
+	
+	go func() {
+		_ = dotServer.ActivateAndServe()
+	}()
+	defer func() {
+		_ = dotServer.Shutdown()
+	}()
+
+	// 4. Test Client
+	client := &dns.Client{
+		Net: "tcp-tls",
+		TLSConfig: &tls.Config{
+			InsecureSkipVerify: true,
+		},
+		Timeout: 2 * time.Second,
+	}
+
+	serverAddr := l.Addr().String()
+
+	t.Run("Allow Query - Forward to Upstream", func(t *testing.T) {
+		m := new(dns.Msg)
+		m.SetQuestion(dns.Fqdn("example.com"), dns.TypeA)
+		
+		r, _, err := client.Exchange(m, serverAddr)
+		if err != nil {
+			t.Fatalf("DoT exchange failed: %v", err)
+		}
+		if r.Rcode != dns.RcodeSuccess {
+			t.Fatalf("expected RcodeSuccess, got %s", dns.RcodeToString[r.Rcode])
+		}
+		if len(r.Answer) == 0 {
+			t.Fatal("expected answers from mock upstream")
+		}
+		aRecord, ok := r.Answer[0].(*dns.A)
+		if !ok {
+			t.Fatal("expected A record answer")
+		}
+		if aRecord.A.String() != "93.184.216.34" {
+			t.Fatalf("expected IP 93.184.216.34, got %s", aRecord.A.String())
+		}
+	})
+
+	t.Run("Block Query - Return Block Page IP", func(t *testing.T) {
+		m := new(dns.Msg)
+		m.SetQuestion(dns.Fqdn("bocongan-verify.xyz"), dns.TypeA)
+		
+		r, _, err := client.Exchange(m, serverAddr)
+		if err != nil {
+			t.Fatalf("DoT exchange failed: %v", err)
+		}
+		if r.Rcode != dns.RcodeSuccess {
+			t.Fatalf("expected RcodeSuccess, got %s", dns.RcodeToString[r.Rcode])
+		}
+		if len(r.Answer) == 0 {
+			t.Fatal("expected block page answer")
+		}
+		aRecord, ok := r.Answer[0].(*dns.A)
+		if !ok {
+			t.Fatal("expected A record answer")
+		}
+		if aRecord.A.String() != "127.0.0.1" {
+			t.Fatalf("expected Block Page IP 127.0.0.1, got %s", aRecord.A.String())
+		}
+	})
+}
+
+func TestDoTHandlerRateLimiter(t *testing.T) {
+	app := &app{
+		risk:           risk.NewService(risk.Options{AnalysisConfig: config.DefaultAnalysisConfig(), RedisTimeout: 10 * time.Millisecond}),
+		metrics:        observability.NewRegistry(),
+		deploymentTier: "budget-vps",
+		blockPageIP:    "127.0.0.1",
+		dnsTTL:         60,
+		dotLimiter:     ratelimit.New(0.1, 0), // Cực kỳ hạn chế
+	}
+	defer func() {
+		_ = app.risk.Close()
+		app.dotLimiter.Close()
+	}()
+
+	// Sinh SSL tự ký và tạo listener
+	selfCert, err := generateSelfSignedCert()
+	if err != nil {
+		t.Fatal(err)
+	}
+	tlsConfig := &tls.Config{Certificates: []tls.Certificate{selfCert}}
+	l, err := tls.Listen("tcp", "127.0.0.1:0", tlsConfig)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer l.Close()
+
+	dotServer := &dns.Server{
+		Listener: l,
+		Net:      "tcp-tls",
+		Handler:  dns.HandlerFunc(app.dotHandler),
+	}
+	go func() { _ = dotServer.ActivateAndServe() }()
+	defer func() { _ = dotServer.Shutdown() }()
+
+	client := &dns.Client{
+		Net: "tcp-tls",
+		TLSConfig: &tls.Config{InsecureSkipVerify: true},
+		Timeout: 2 * time.Second,
+	}
+
+	m := new(dns.Msg)
+	m.SetQuestion(dns.Fqdn("example.com"), dns.TypeA)
+
+	// Cuộc gọi đầu tiên có thể được chấp nhận hoặc bị từ chối tùy thuộc vào việc burst = 0.
+	// Nhưng chắc chắn cuộc gọi thứ 2 liên tiếp sẽ bị chặn vì RPM = 0.1, burst = 0.
+	_, _, _ = client.Exchange(m, l.Addr().String())
+	r, _, err := client.Exchange(m, l.Addr().String())
+	if err != nil {
+		t.Fatalf("DoT exchange failed: %v", err)
+	}
+
+	if r.Rcode != dns.RcodeRefused {
+		t.Fatalf("expected RcodeRefused due to rate limit, got %s", dns.RcodeToString[r.Rcode])
+	}
+}
+
+func TestDoTHandlerConcurrent(t *testing.T) {
+	mockUpstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		wire, _ := readDNSMessage(w, r)
+		query := new(dns.Msg)
+		_ = query.Unpack(wire)
+
+		resp := new(dns.Msg)
+		resp.SetReply(query)
+		resp.Answer = append(resp.Answer, &dns.A{
+			Hdr: dns.RR_Header{Name: query.Question[0].Name, Rrtype: dns.TypeA, Class: dns.ClassINET, Ttl: 60},
+			A:   net.ParseIP("1.1.1.1"),
+		})
+		respWire, _ := resp.Pack()
+		w.Header().Set("Content-Type", "application/dns-message")
+		_, _ = w.Write(respWire)
+	}))
+	defer mockUpstream.Close()
+
+	app := &app{
+		risk:           risk.NewService(risk.Options{AnalysisConfig: config.DefaultAnalysisConfig(), RedisTimeout: 10 * time.Millisecond}),
+		metrics:        observability.NewRegistry(),
+		deploymentTier: "budget-vps",
+		upstreamDoHURL: mockUpstream.URL,
+		upstreamClient: mockUpstream.Client(),
+		blockPageIP:    "127.0.0.1",
+		dnsTTL:         60,
+		dotLimiter:     ratelimit.New(1000, 100), // Cực kỳ rộng rãi
+	}
+	defer func() {
+		_ = app.risk.Close()
+		app.dotLimiter.Close()
+	}()
+
+	selfCert, err := generateSelfSignedCert()
+	if err != nil {
+		t.Fatal(err)
+	}
+	tlsConfig := &tls.Config{Certificates: []tls.Certificate{selfCert}}
+	l, err := tls.Listen("tcp", "127.0.0.1:0", tlsConfig)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer l.Close()
+
+	dotServer := &dns.Server{
+		Listener: l,
+		Net:      "tcp-tls",
+		Handler:  dns.HandlerFunc(app.dotHandler),
+	}
+	go func() { _ = dotServer.ActivateAndServe() }()
+	defer func() { _ = dotServer.Shutdown() }()
+
+	var wg sync.WaitGroup
+	concurrentRequests := 10
+
+	for i := 0; i < concurrentRequests; i++ {
+		wg.Add(1)
+		go func(id int) {
+			defer wg.Done()
+			client := &dns.Client{
+				Net: "tcp-tls",
+				TLSConfig: &tls.Config{InsecureSkipVerify: true},
+				Timeout: 2 * time.Second,
+			}
+			m := new(dns.Msg)
+			m.SetQuestion(dns.Fqdn(fmt.Sprintf("domain-%d.com", id)), dns.TypeA)
+			r, _, err := client.Exchange(m, l.Addr().String())
+			if err != nil {
+				t.Errorf("[Goroutine %d] Exchange failed: %v", id, err)
+				return
+			}
+			if r.Rcode != dns.RcodeSuccess {
+				t.Errorf("[Goroutine %d] Expected Success, got %d", id, r.Rcode)
+			}
+		}(i)
+	}
+	wg.Wait()
+}
+
+func TestDoTHandlerPanicRecovery(t *testing.T) {
+	// Giả lập một panic xảy ra khi gọi a.risk.Policy do a.risk = nil
+	app := &app{
+		risk:           nil, // Gây panic nil pointer dereference khi xử lý
+		metrics:        observability.NewRegistry(),
+		deploymentTier: "budget-vps",
+	}
+
+	selfCert, err := generateSelfSignedCert()
+	if err != nil {
+		t.Fatal(err)
+	}
+	tlsConfig := &tls.Config{Certificates: []tls.Certificate{selfCert}}
+	l, err := tls.Listen("tcp", "127.0.0.1:0", tlsConfig)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer l.Close()
+
+	dotServer := &dns.Server{
+		Listener: l,
+		Net:      "tcp-tls",
+		Handler:  dns.HandlerFunc(app.dotHandler),
+	}
+	go func() { _ = dotServer.ActivateAndServe() }()
+	defer func() { _ = dotServer.Shutdown() }()
+
+	client := &dns.Client{
+		Net: "tcp-tls",
+		TLSConfig: &tls.Config{InsecureSkipVerify: true},
+		Timeout: 2 * time.Second,
+	}
+
+	m := new(dns.Msg)
+	m.SetQuestion(dns.Fqdn("example.com"), dns.TypeA)
+
+	r, _, err := client.Exchange(m, l.Addr().String())
+	if err != nil {
+		t.Fatalf("Exchange failed: %v", err)
+	}
+
+	// Đảm bảo Rcode là RcodeServerFailure do panic được recover
+	if r.Rcode != dns.RcodeServerFailure {
+		t.Fatalf("expected RcodeServerFailure due to panic, got %s", dns.RcodeToString[r.Rcode])
+	}
+}
+
+func TestDoTHandlerIPv6Sanitization(t *testing.T) {
+	mockUpstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		wire, _ := readDNSMessage(w, r)
+		query := new(dns.Msg)
+		_ = query.Unpack(wire)
+		resp := new(dns.Msg)
+		resp.SetReply(query)
+		respWire, _ := resp.Pack()
+		w.Header().Set("Content-Type", "application/dns-message")
+		_, _ = w.Write(respWire)
+	}))
+	defer mockUpstream.Close()
+
+	app := &app{
+		risk:           risk.NewService(risk.Options{AnalysisConfig: config.DefaultAnalysisConfig(), RedisTimeout: 10 * time.Millisecond}),
+		metrics:        observability.NewRegistry(),
+		deploymentTier: "budget-vps",
+		upstreamDoHURL: mockUpstream.URL,
+		upstreamClient: mockUpstream.Client(),
+		blockPageIP:    "127.0.0.1",
+		dnsTTL:         60,
+		dotLimiter:     ratelimit.New(100, 10),
+	}
+	defer func() {
+		_ = app.risk.Close()
+		app.dotLimiter.Close()
+	}()
+
+	// Tạo một mock ResponseWriter với IP IPv6 dạng [::1] (hoặc địa chỉ có dấu ngoặc)
+	mockWriter := &mockDNSWriter{remoteAddr: &mockAddr{net: "tcp", addr: "[::1]:12345"}}
+	
+	m := new(dns.Msg)
+	m.SetQuestion(dns.Fqdn("example.com"), dns.TypeA)
+
+	app.dotHandler(mockWriter, m)
+
+	if mockWriter.writtenMsg == nil {
+		t.Fatal("expected message to be written")
+	}
+
+	if mockWriter.writtenMsg.Rcode != dns.RcodeSuccess {
+		t.Fatalf("expected RcodeSuccess, got %d", mockWriter.writtenMsg.Rcode)
+	}
+}
+
+type mockDNSWriter struct {
+	remoteAddr net.Addr
+	writtenMsg *dns.Msg
+}
+
+func (m *mockDNSWriter) LocalAddr() net.Addr { return nil }
+func (m *mockDNSWriter) RemoteAddr() net.Addr { return m.remoteAddr }
+func (m *mockDNSWriter) WriteMsg(msg *dns.Msg) error {
+	m.writtenMsg = msg
+	return nil
+}
+func (m *mockDNSWriter) Write(p []byte) (int, error) { return 0, nil }
+func (m *mockDNSWriter) Close() error { return nil }
+func (m *mockDNSWriter) TsigStatus() error { return nil }
+func (m *mockDNSWriter) TsigTimersOnly(bool) {}
+func (m *mockDNSWriter) Hijack() {}
+
+type mockAddr struct {
+	net  string
+	addr string
+}
+
+func (a *mockAddr) Network() string { return a.net }
+func (a *mockAddr) String() string  { return a.addr }
+

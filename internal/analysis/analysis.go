@@ -7,6 +7,8 @@ import (
 	"strings"
 	"unicode"
 	"unicode/utf8"
+
+	"safe-road/internal/config"
 )
 
 type Verdict string
@@ -24,9 +26,113 @@ type Result struct {
 	Confidence float64  `json:"confidence"`
 	Score      int      `json:"score"`
 	Reasons    []string `json:"reasons"`
+	Category   string   `json:"category,omitempty"` // e.g., "social_media", "adult", "gambling", "gaming", "advertising", "malware", "phishing", "uncategorized"
+}
+
+type Analyzer struct {
+	config config.AnalysisConfig
+}
+
+func NewAnalyzer(cfg config.AnalysisConfig) *Analyzer {
+	return &Analyzer{
+		config: cfg,
+	}
 }
 
 func Analyze(input string) Result {
+	// Fallback function for compatibility, uses default config
+	return NewAnalyzer(config.DefaultAnalysisConfig()).Analyze(input)
+}
+
+func ClassifyCategory(domain string) string {
+	domain = strings.ToLower(strings.TrimSpace(domain))
+	if domain == "" {
+		return "uncategorized"
+	}
+
+	// Helper to check suffix
+	hasSuffix := func(d, parent string) bool {
+		return d == parent || strings.HasSuffix(d, "."+parent)
+	}
+
+	// 1. Social Media
+	socialDomains := []string{
+		"facebook.com", "fb.com", "messenger.com", "instagram.com", "tiktok.com",
+		"twitter.com", "x.com", "youtube.com", "youtu.be", "reddit.com",
+		"linkedin.com", "pinterest.com", "snapchat.com", "tumblr.com",
+		"whatsapp.com", "telegram.org", "t.me", "discord.com", "discord.gg",
+	}
+	for _, sd := range socialDomains {
+		if hasSuffix(domain, sd) {
+			return "social_media"
+		}
+	}
+
+	// 2. Advertising / Tracker
+	adDomains := []string{
+		"doubleclick.net", "adservice.google.com", "adnxs.com", "adsrvr.org",
+		"rubiconproject.com", "adcolony.com", "unityads.com", "applovin.com",
+		"criteo.com", "taboola.com", "outbrain.com", "google-analytics.com",
+		"scorecardresearch.com", "hotjar.com", "mixpanel.com",
+	}
+	for _, ad := range adDomains {
+		if hasSuffix(domain, ad) {
+			return "advertising"
+		}
+	}
+	// Check prefixes or contains for advertising
+	if strings.HasPrefix(domain, "ads.") || strings.HasPrefix(domain, "ad.") || 
+		strings.Contains(domain, "analytics.") || strings.Contains(domain, "tracker.") || 
+		strings.Contains(domain, "telemetry.") || strings.Contains(domain, "-analytics") || 
+		strings.Contains(domain, "adserver") {
+		return "advertising"
+	}
+
+	// 3. Adult Content
+	adultTLDs := []string{".xxx", ".adult", ".sexy", ".porn"}
+	for _, tld := range adultTLDs {
+		if strings.HasSuffix(domain, tld) {
+			return "adult"
+		}
+	}
+	adultKeywords := []string{"porn", "sex", "xvideos", "xnxx", "pornhub", "redtube", "onlyfans", "erotic", "hentai", "jav"}
+	for _, kw := range adultKeywords {
+		if strings.Contains(domain, kw) {
+			return "adult"
+		}
+	}
+
+	// 4. Gambling
+	gamblingKeywords := []string{"casino", "gamble", "lottery", "poker", "slot", "w88", "fun88", "m88", "188bet", "kubet", "bet88", "blackjack", "roulette"}
+	for _, kw := range gamblingKeywords {
+		if strings.Contains(domain, kw) {
+			return "gambling"
+		}
+	}
+
+	// 5. Gaming
+	gamingDomains := []string{
+		"roblox.com", "minecraft.net", "twitch.tv", "steamcommunity.com",
+		"steampowered.com", "playstation.com", "xbox.com", "nintendo.com",
+		"pubg.com", "epicgames.com", "riotgames.com", "blizzard.com",
+		"origin.com", "ubisoft.com", "ea.com",
+	}
+	for _, gd := range gamingDomains {
+		if hasSuffix(domain, gd) {
+			return "gaming"
+		}
+	}
+	gamingKeywords := []string{"gaming", "arcade", "playgame"}
+	for _, kw := range gamingKeywords {
+		if strings.Contains(domain, kw) {
+			return "gaming"
+		}
+	}
+
+	return "uncategorized"
+}
+
+func (a *Analyzer) Analyze(input string) Result {
 	domain, err := NormalizeDomain(input)
 	if err != nil {
 		return Result{
@@ -35,6 +141,7 @@ func Analyze(input string) Result {
 			Confidence: 1,
 			Score:      100,
 			Reasons:    []string{err.Error()},
+			Category:   "uncategorized",
 		}
 	}
 
@@ -42,35 +149,51 @@ func Analyze(input string) Result {
 	reasons := make([]string, 0, 6)
 
 	if strings.HasPrefix(domain, "xn--") || strings.Contains(domain, ".xn--") {
-		score += 35
+		score += a.config.PunycodeScore
 		reasons = append(reasons, "punycode detected")
 	}
 
-	if len(domain) > 24 {
-		score += 15
+	if len(domain) > a.config.LongDomainLength {
+		score += a.config.LongDomainScore
 		reasons = append(reasons, "domain is long")
 	}
 
-	if hyphenCount := strings.Count(domain, "-"); hyphenCount >= 3 {
-		score += 10
+	if hyphenCount := strings.Count(domain, "-"); hyphenCount >= a.config.HyphenCountThreshold {
+		score += a.config.HyphenScore
 		reasons = append(reasons, "many hyphens")
 	}
 
-	if digitRatio(domain) > 0.25 {
-		score += 10
+	if digitRatio(domain) > a.config.DigitRatioThreshold {
+		score += a.config.DigitRatioScore
 		reasons = append(reasons, "high digit ratio")
 	}
 
 	if mixedScripts(domain) {
-		score += 25
+		score += a.config.MixedScriptScore
 		reasons = append(reasons, "mixed script characters")
 	}
 
-	if keywordCount, keywordScore := suspiciousKeywordStats(domain); keywordScore > 0 {
+	if keywordCount, keywordScore := a.suspiciousKeywordStats(domain); keywordScore > 0 {
 		score += keywordScore
 		reasons = append(reasons, "phishing keyword pattern")
 		if keywordCount >= 2 {
 			reasons = append(reasons, "multiple phishing keywords")
+		}
+	}
+
+	// 7. Advanced Brand Spoofing Detection
+	if isSpoof, reason, penalty := CheckBrandSpoofing(domain, a.config.BrandSpoofingScore); isSpoof {
+		score += penalty
+		reasons = append(reasons, reason)
+	}
+
+	// 8. Shannon Entropy Analysis (DGA detection)
+	mainLabel := getMainLabel(domain)
+	if len(mainLabel) >= 8 {
+		entropy := ShannonEntropy(mainLabel)
+		if entropy > a.config.EntropyThreshold {
+			score += a.config.EntropyScore
+			reasons = append(reasons, "high lexical entropy")
 		}
 	}
 
@@ -86,12 +209,28 @@ func Analyze(input string) Result {
 		verdict = VerdictSuspicious
 	}
 
+	category := ClassifyCategory(domain)
+	if category == "uncategorized" {
+		if verdict == VerdictMalicious {
+			category = "malware"
+			for _, r := range reasons {
+				if strings.Contains(strings.ToLower(r), "phishing") {
+					category = "phishing"
+					break
+				}
+			}
+		} else if verdict == VerdictSuspicious {
+			category = "suspicious"
+		}
+	}
+
 	return Result{
 		Domain:     domain,
 		Verdict:    verdict,
 		Confidence: math.Min(1, 0.45+float64(score)/120),
 		Score:      score,
 		Reasons:    reasons,
+		Category:   category,
 	}
 }
 
@@ -171,8 +310,8 @@ func mixedScripts(value string) bool {
 	return hasLatin && hasNonLatin
 }
 
-func suspiciousKeywordStats(value string) (int, int) {
-	keywords := []string{"login", "secure", "verify", "account", "update", "support", "wallet"}
+func (a *Analyzer) suspiciousKeywordStats(value string) (int, int) {
+	keywords := a.config.GetKeywords()
 	keywordCount := 0
 	for _, keyword := range keywords {
 		if strings.Contains(value, keyword) {
@@ -184,9 +323,9 @@ func suspiciousKeywordStats(value string) (int, int) {
 		return 0, 0
 	}
 
-	keywordScore := 15 + keywordCount*10
+	keywordScore := a.config.KeywordBaseScore + keywordCount*a.config.KeywordMatchScore
 	if keywordCount >= 2 {
-		keywordScore += 10
+		keywordScore += a.config.KeywordMultipleBonus
 	}
 
 	return keywordCount, keywordScore
@@ -201,3 +340,4 @@ func (e invalidDomainError) Error() string {
 func errInvalidDomain(message string) error {
 	return invalidDomainError(message)
 }
+

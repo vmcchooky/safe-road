@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"safe-road/internal/cache"
+	"safe-road/internal/safefile"
 )
 
 const DefaultThreatFeedKey = "safe-road:threat:feed"
@@ -125,7 +126,7 @@ func OpenSource(ctx context.Context, source string, client *http.Client) (io.Rea
 		return wrapMaybeCompressedReadCloser(resp.Body, source, resp.Header.Get("Content-Encoding"))
 	}
 
-	file, err := os.Open(source)
+	file, err := safefile.Open(source)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
 			return nil, func() {}, fmt.Errorf("feed source file does not exist: %s", source)
@@ -133,7 +134,13 @@ func OpenSource(ctx context.Context, source string, client *http.Client) (io.Rea
 		return nil, func() {}, err
 	}
 
-	return wrapMaybeCompressedReadCloser(file, source, "")
+	reader, closeReader, err := wrapMaybeCompressedReadCloser(file, source, "")
+	if err != nil {
+		_ = file.Close()
+		return nil, func() {}, err
+	}
+
+	return reader, closeReader, nil
 }
 
 func wrapMaybeCompressedReadCloser(body io.ReadCloser, source string, contentEncoding string) (io.ReadCloser, func(), error) {

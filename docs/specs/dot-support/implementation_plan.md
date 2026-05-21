@@ -1,0 +1,91 @@
+# Kế hoạch triển khai: Hỗ trợ DNS-over-TLS (DoT) (Hướng 7)
+
+Bản kế hoạch này mô tả chi tiết phương án thiết kế và triển khai cổng **DNS-over-TLS (DoT)** trên cổng `853` song song với cổng **DNS-over-HTTPS (DoH)** hiện có. Điều này giúp dự án bảo vệ các thiết bị di động (đặc biệt là Android với tính năng Private DNS mặc định) mà không cần cài đặt phần mềm ngoài, tuân thủ tuyệt đối triết lý **Zero-Cost** và **Zero-Configuration**.
+
+---
+
+## User Review Required
+
+> [!IMPORTANT]
+> **Tự động sinh chứng chỉ tự ký (Self-Signed Certificates):**
+> Nhằm đơn giản hóa quá trình phát triển cục bộ và đảm bảo dịch vụ khởi chạy tức thì mà không bị crash, kế hoạch đề xuất giải pháp sinh chứng chỉ TLS tự ký trực tiếp trên RAM nếu không có chứng chỉ thật được cấu hình.
+>
+> **Không chiếm quyền Root ở Local (Cổng 8533 làm mặc định khi Dev):**
+> Ở các hệ điều hành Unix/Linux, các cổng `< 1024` yêu cầu quyền root. Để phát triển và kiểm thử ở local dễ dàng, mặc định chúng ta sẽ chạy cổng DoT trên cổng tùy biến `:8533` (hoặc cổng cấu hình `.env` `SAFE_ROAD_DNS_DOT_ADDR`), và chỉ chạy trên cổng `:853` thực tế khi triển khai Docker/Production.
+
+---
+
+## Open Questions
+
+Không có câu hỏi mở nào. Các đề xuất trên tuân thủ chuẩn thực hành kỹ thuật phần mềm an toàn, linh hoạt và tối ưu hiệu năng.
+
+---
+
+## Proposed Changes
+
+### 1. DNS Resolver Component (`cmd/dns-resolver`)
+
+Thực hiện cập nhật và cấu hình để chạy song song server DoT và DoH.
+
+#### [MODIFY] [main.go](file:///d:/Go/duan/safe-road/cmd/dns-resolver/main.go)
+-   **Struct `app`:** Bổ sung trường `dotLimiter *ratelimit.Limiter`.
+-   **Khởi chạy `main()`:**
+    -   Tải các biến cấu hình từ môi trường (`SAFE_ROAD_DNS_DOT_ENABLED`, `SAFE_ROAD_DNS_DOT_ADDR`, `SAFE_ROAD_DNS_DOT_CERT_FILE`, `SAFE_ROAD_DNS_DOT_KEY_FILE`, `SAFE_ROAD_RATELIMIT_DOT_RPM`, `SAFE_ROAD_RATELIMIT_DOT_BURST`).
+    -   Khởi tạo `dotLimiter` nếu rate limiting được bật.
+    -   Tạo TLS Config. Load chứng chỉ thật từ đường dẫn, hoặc tự sinh Self-Signed Certificate nếu đường dẫn rỗng hoặc file lỗi nhờ hàm helper `generateSelfSignedCert`.
+    -   Khởi chạy server HTTP DoH và server DoT song song bằng goroutine.
+    -   Bắt tín hiệu `SIGINT/SIGTERM` để shutdown graceful cả hai server.
+-   **Hàm `dotHandler(w dns.ResponseWriter, r *dns.Msg)`:** Nhận truy vấn DoT, kiểm tra Rate Limit, kiểm tra chính sách block/allow, forward tới upstream bằng DoH và trả lời client.
+-   **Hàm helper `generateSelfSignedCert() (tls.Certificate, error)`:** Sinh chứng chỉ SSL tự ký 2048-bit RSA tạm thời trực tiếp trên RAM.
+-   **Hàm `blockedDNSMessage(query *dns.Msg) (*dns.Msg, error)`:** Dịch chuyển logic tạo message DNS block từ byte thô của DoH sang đối tượng `dns.Msg` của DoT.
+-   **Hàm `sendServfail(w dns.ResponseWriter, r *dns.Msg)`:** Đóng gói gửi phản hồi ServFail.
+
+#### [MODIFY] [main_test.go](file:///d:/Go/duan/safe-road/cmd/dns-resolver/main_test.go)
+-   Bổ sung test suite cho DoT:
+    -   `TestGenerateSelfSignedCert`: Kiểm thử thành công tính năng tự sinh SSL.
+    -   `TestDoTHandlerBasic`: Gửi truy vấn DoT giả lập (Allow & Block) và kiểm tra kết quả trả về.
+    -   `TestDoTHandlerRateLimiter`: Kiểm tra DoT phản hồi `RcodeRefused` khi bị rate limit.
+    -   `TestDoTHandlerConcurrent`: Kiểm thử an toàn đa luồng trên DoT handler.
+
+---
+
+### 2. Configuration & Infrastructure
+
+#### [MODIFY] [.env.example](file:///d:/Go/duan/safe-road/.env.example)
+-   Bổ sung các biến cấu hình:
+    ```bash
+    # DNS-over-TLS (DoT) Configurations
+    SAFE_ROAD_DNS_DOT_ENABLED=true
+    SAFE_ROAD_DNS_DOT_ADDR=:8533
+    SAFE_ROAD_DNS_DOT_CERT_FILE=
+    SAFE_ROAD_DNS_DOT_KEY_FILE=
+    SAFE_ROAD_RATELIMIT_DOT_RPM=100
+    SAFE_ROAD_RATELIMIT_DOT_BURST=20
+    ```
+
+#### [MODIFY] [docker-compose.yml](file:///d:/Go/duan/safe-road/docker-compose.yml)
+-   Mở cổng `853` trỏ về container `dns-resolver` để sẵn sàng hỗ trợ di động.
+-   Thiết lập các biến môi trường tương ứng cho môi trường Docker production (mặc định trỏ về cổng `:853`).
+
+---
+
+## Verification Plan
+
+### Automated Tests
+-   Chạy toàn bộ các ca kiểm thử bảo mật đa luồng và đơn luồng để đảm bảo không bị lỗi biên dịch hoặc rò rỉ:
+    ```bash
+    go test -race -count=1 ./...
+    ```
+-   Chạy các ca kiểm thử cụ thể của `cmd/dns-resolver` để kiểm chứng logic xử lý:
+    ```bash
+    go test -v ./cmd/dns-resolver/...
+    ```
+
+### Manual Verification
+-   Khởi chạy dịch vụ `dns-resolver` trên local (`go run ./cmd/dns-resolver`).
+-   Sử dụng công cụ `kdig` hoặc `dog` (nếu có) gửi truy vấn DoT lên cổng `8533`:
+    ```bash
+    kdig @127.0.0.1 -p 8533 +tls example.com
+    kdig @127.0.0.1 -p 8533 +tls -v bocongan-verify.xyz
+    ```
+-   Kiểm tra xem tên miền cảnh báo có lập tức trả về IP trang block page của hệ thống hay không.

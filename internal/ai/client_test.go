@@ -63,3 +63,37 @@ func TestRefineDisabled(t *testing.T) {
 		t.Fatal("expected disabled client error")
 	}
 }
+
+func TestRefineParsesCategoryResponse(t *testing.T) {
+	// Case 1: AI returns a specific category
+	server1 := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`{"candidates":[{"content":{"parts":[{"text":"{\"verdict\":\"SAFE\",\"confidence\":0.95,\"category\":\"social_media\",\"reason\":\"trusted social network\"}"}]}}]}`))
+	}))
+	defer server1.Close()
+
+	client1 := New(server1.URL+"/v1beta", "test-key", "gemini-2.5-flash-lite", time.Second)
+	res1, err := client1.Refine(context.Background(), "facebook.com", analysis.Result{Domain: "facebook.com"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res1.Category != "social_media" {
+		t.Fatalf("expected category social_media, got %s", res1.Category)
+	}
+
+	// Case 2: AI returns uncategorized, fallback to heuristics
+	server2 := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`{"candidates":[{"content":{"parts":[{"text":"{\"verdict\":\"SAFE\",\"confidence\":0.80,\"category\":\"uncategorized\",\"reason\":\"general site\"}"}]}}]}`))
+	}))
+	defer server2.Close()
+
+	client2 := New(server2.URL+"/v1beta", "test-key", "gemini-2.5-flash-lite", time.Second)
+	res2, err := client2.Refine(context.Background(), "facebook.com", analysis.Result{Domain: "facebook.com"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Facebook.com is classified as social_media by local heuristics
+	if res2.Category != "social_media" {
+		t.Fatalf("expected category to fallback to social_media, got %s", res2.Category)
+	}
+}
+

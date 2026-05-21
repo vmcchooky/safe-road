@@ -1,0 +1,1398 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="Safe Road operational control plane — analyze domains, manage overrides, view telemetry and system health.">
+  <title>Safe Road Dashboard</title>
+  <style>
+    :root {
+      color-scheme: light dark;
+      --ink: #12212d;
+      --muted: #61707d;
+      --line: rgba(18,33,45,.12);
+      --bg: #edf2f7;
+      --panel: rgba(255,255,255,.88);
+      --panel-strong: #ffffff;
+      --safe: #177d53;
+      --warn: #a96d18;
+      --bad: #ab2f3f;
+      --accent: #1d6f8a;
+      --accent-2: #4b5ed7;
+      --shadow: 0 18px 55px rgba(13,28,43,.12);
+    }
+    @media (prefers-color-scheme: dark) {
+      :root {
+        --ink: #dde4ea;
+        --muted: #8a9aa7;
+        --line: rgba(220,235,245,.10);
+        --bg: #0f1a23;
+        --panel: rgba(22,34,46,.90);
+        --panel-strong: #19293a;
+        --shadow: 0 18px 55px rgba(0,0,0,.45);
+      }
+    }
+    *, *::before, *::after { box-sizing: border-box; }
+    body {
+      margin: 0;
+      color: var(--ink);
+      background:
+        radial-gradient(circle at top left, rgba(29,111,138,.14), transparent 33%),
+        radial-gradient(circle at 88% 8%, rgba(75,94,215,.12), transparent 28%),
+        linear-gradient(180deg, #f7fbfe 0%, var(--bg) 100%);
+      font: 15px/1.5 "Segoe UI Variable Text","Aptos","Trebuchet MS",sans-serif;
+      min-height: 100vh;
+    }
+    @media (prefers-color-scheme: dark) {
+      body { background: radial-gradient(circle at top left, rgba(29,111,138,.12), transparent 33%), linear-gradient(180deg, #0f1f2e 0%, var(--bg) 100%); }
+    }
+    .shell { width: min(1200px, calc(100vw - 32px)); margin: 0 auto; padding: 20px 0 48px; }
+    header {
+      display: grid; gap: 16px; padding: 18px 22px 20px;
+      margin-bottom: 16px; border: 1px solid var(--line); border-radius: 24px;
+      background: linear-gradient(135deg, var(--panel-strong) 0%, rgba(245,249,252,.84) 100%);
+      box-shadow: var(--shadow); backdrop-filter: blur(12px);
+    }
+    .hero { display: flex; align-items: flex-start; justify-content: space-between; gap: 20px; flex-wrap: wrap; }
+    .title { display: grid; gap: 6px; max-width: 720px; }
+    .eyebrow { color: var(--accent); font-size: 12px; font-weight: 800; letter-spacing: .16em; text-transform: uppercase; }
+    h1 { margin: 0; font-size: clamp(28px,4vw,44px); line-height: 1.04; letter-spacing: -.04em; }
+    .subtitle { margin: 0; max-width: 60ch; color: var(--muted); }
+    .status-pills { display: flex; flex-wrap: wrap; gap: 10px; align-items: center; justify-content: flex-end; }
+    .chip {
+      display: inline-flex; align-items: center; gap: 8px; min-height: 36px; padding: 0 14px;
+      border: 1px solid var(--line); border-radius: 999px;
+      background: rgba(255,255,255,.78); color: var(--muted); font-size: 13px; font-weight: 700; white-space: nowrap;
+    }
+    @media (prefers-color-scheme: dark) { .chip { background: rgba(30,48,62,.78); } }
+    .chip strong { color: var(--ink); }
+    .chip.ok { color: var(--safe); } .chip.warn { color: var(--warn); } .chip.bad { color: var(--bad); }
+    .hero-grid { display: grid; grid-template-columns: repeat(5,minmax(0,1fr)); gap: 12px; padding: 0 0 4px; }
+    .metric { display: grid; gap: 4px; padding: 14px 14px 15px; border-radius: 16px; background: linear-gradient(180deg,rgba(248,251,254,.95),rgba(241,246,251,.92)); border: 1px solid rgba(18,33,45,.08); }
+    @media (prefers-color-scheme: dark) { .metric { background: rgba(25,40,55,.85); border-color: rgba(200,220,240,.08); } }
+    .metric strong { font-size: 22px; line-height: 1; letter-spacing: -.03em; }
+    .metric span { color: var(--muted); font-size: 11px; font-weight: 700; text-transform: uppercase; letter-spacing: .08em; }
+
+    /* ── Tabs ── */
+    .tabs { display: flex; gap: 4px; padding: 4px; background: var(--panel); border: 1px solid var(--line); border-radius: 18px; box-shadow: var(--shadow); backdrop-filter: blur(12px); margin-bottom: 16px; flex-wrap: wrap; }
+    .tab-btn { flex: 1 1 auto; min-width: 100px; padding: 9px 18px; border: none; border-radius: 14px; background: transparent; color: var(--muted); font: inherit; font-size: 14px; font-weight: 700; cursor: pointer; transition: background 140ms ease, color 140ms ease; white-space: nowrap; }
+    .tab-btn.active { background: linear-gradient(135deg, var(--accent), var(--accent-2)); color: #fff; box-shadow: 0 8px 20px rgba(29,111,138,.25); }
+    .tab-btn:not(.active):hover { background: rgba(29,111,138,.08); color: var(--ink); }
+    .logout-btn {
+      flex: 0 0 auto !important;
+      min-width: unset !important;
+      color: var(--bad) !important;
+      margin-left: auto;
+      border: 1px solid rgba(171, 47, 63, 0.2) !important;
+    }
+    .logout-btn:hover {
+      background: rgba(171, 47, 63, 0.1) !important;
+      color: #ff6b6b !important;
+      border-color: rgba(171, 47, 63, 0.4) !important;
+    }
+    .tab-content { display: none; } .tab-content.active { display: block; }
+
+    /* ── Panels ── */
+    main { display: grid; gap: 16px; }
+    .panel { border: 1px solid var(--line); border-radius: 20px; background: var(--panel); box-shadow: var(--shadow); overflow: hidden; backdrop-filter: blur(12px); }
+    .panel-head { display: flex; justify-content: space-between; gap: 12px; align-items: center; padding: 14px 16px; border-bottom: 1px solid var(--line); background: rgba(255,255,255,.45); }
+    @media (prefers-color-scheme: dark) { .panel-head { background: rgba(15,26,36,.45); } }
+    .panel-head h2 { margin: 0; font-size: 13px; font-weight: 800; letter-spacing: .08em; text-transform: uppercase; color: var(--muted); }
+    .panel-head span { color: var(--muted); font-size: 13px; font-weight: 700; }
+
+    /* ── Forms ── */
+    .toolbar { display: grid; grid-template-columns: minmax(0,1fr) auto; gap: 12px; align-items: center; padding: 16px; border: 1px solid var(--line); border-radius: 20px; background: var(--panel); box-shadow: var(--shadow); backdrop-filter: blur(12px); }
+    input, select, textarea { min-height: 42px; border-radius: 14px; font: inherit; background: var(--panel-strong); color: var(--ink); border: 1px solid var(--line); padding: 0 14px; outline: none; transition: border-color 140ms,box-shadow 140ms; }
+    input:focus, select:focus { border-color: rgba(29,111,138,.45); box-shadow: 0 0 0 4px rgba(29,111,138,.12); }
+    button { min-height: 42px; border-radius: 14px; font: inherit; border: 0; padding: 0 18px; color: #fff; background: linear-gradient(135deg,var(--accent),var(--accent-2)); font-weight: 700; cursor: pointer; box-shadow: 0 12px 24px rgba(29,111,138,.18); transition: transform 140ms ease, box-shadow 140ms ease, opacity 140ms; }
+    button:hover:not(:disabled) { transform: translateY(-1px); box-shadow: 0 16px 30px rgba(29,111,138,.22); }
+    button:disabled { opacity: .65; cursor: wait; }
+    .ghost { background: transparent; color: var(--ink); border: 1px solid var(--line); box-shadow: none; }
+    .ghost:hover:not(:disabled) { box-shadow: none; background: rgba(255,255,255,.9); }
+    @media (prefers-color-scheme: dark) { .ghost:hover:not(:disabled) { background: rgba(40,60,76,.9); } }
+    .btn-danger { background: linear-gradient(135deg,#c0392b,#e74c3c); box-shadow: 0 8px 18px rgba(192,57,43,.2); }
+    .btn-sm { min-height: 32px; padding: 0 12px; font-size: 13px; border-radius: 10px; }
+    .btn-allow { background: linear-gradient(135deg, var(--safe), #1f9c68); }
+    .btn-block { background: linear-gradient(135deg, var(--bad), #c0392b); }
+
+    /* ── Grid layouts ── */
+    .grid-2 { display: grid; grid-template-columns: minmax(0,1fr) 340px; gap: 16px; align-items: start; }
+    .stack { display: grid; gap: 16px; }
+    .subgrid { display: grid; grid-template-columns: repeat(3,minmax(0,1fr)); gap: 12px; }
+    .subcard { padding: 12px 13px; border-radius: 16px; border: 1px solid rgba(18,33,45,.08); background: rgba(255,255,255,.82); display: grid; gap: 4px; }
+    @media (prefers-color-scheme: dark) { .subcard { background: rgba(25,42,58,.82); border-color: rgba(200,220,240,.08); } }
+    .subcard span { color: var(--muted); font-size: 12px; text-transform: uppercase; letter-spacing: .08em; font-weight: 800; }
+    .subcard strong { font-size: 17px; letter-spacing: -.02em; }
+
+    /* ── Result & verdict ── */
+    .verdict-banner { display: grid; gap: 10px; padding: 16px; border-radius: 18px; background: linear-gradient(135deg,rgba(29,111,138,.08),rgba(75,94,215,.08)); border: 1px solid rgba(18,33,45,.08); }
+    .verdict-row { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; }
+    .verdict-row strong { font-size: 28px; letter-spacing: -.04em; }
+    .verdict-meta { color: var(--muted); font-weight: 700; }
+    .verdict { display: inline-flex; align-items: center; gap: 8px; padding: 6px 12px; border-radius: 999px; font-size: 12px; font-weight: 800; letter-spacing: .06em; text-transform: uppercase; background: rgba(255,255,255,.72); border: 1px solid rgba(18,33,45,.1); }
+    @media (prefers-color-scheme: dark) { .verdict { background: rgba(20,35,50,.72); } }
+    .SAFE { color: var(--safe); } .SUSPICIOUS { color: var(--warn); } .MALICIOUS, .INVALID { color: var(--bad); }
+    dl { display: grid; grid-template-columns: 110px 1fr; gap: 10px 12px; margin: 0; }
+    dt { color: var(--muted); } dd { margin: 0; overflow-wrap: anywhere; font-weight: 650; }
+    .reasons { display: flex; flex-wrap: wrap; gap: 8px; margin: 0; padding: 0; list-style: none; }
+    .reasons li { border: 1px solid var(--line); border-radius: 999px; padding: 4px 10px; color: var(--muted); background: rgba(255,255,255,.82); font-size: 13px; }
+    @media (prefers-color-scheme: dark) { .reasons li { background: rgba(25,42,58,.82); } }
+    .result-body { display: grid; gap: 16px; padding: 16px; }
+    .empty { padding: 18px; color: var(--muted); }
+
+    /* ── Recent list ── */
+    .recent-list { display: grid; gap: 12px; padding: 16px; }
+    .recent-item { padding: 14px; border-radius: 16px; border: 1px solid rgba(18,33,45,.08); background: rgba(255,255,255,.82); display: grid; gap: 10px; }
+    @media (prefers-color-scheme: dark) { .recent-item { background: rgba(22,36,50,.82); border-color: rgba(200,220,240,.08); } }
+    .recent-top { display: flex; justify-content: space-between; gap: 12px; align-items: center; flex-wrap: wrap; }
+    .recent-domain { font-weight: 800; overflow-wrap: anywhere; }
+    .recent-meta { color: var(--muted); font-size: 13px; display: flex; flex-wrap: wrap; gap: 8px 12px; }
+    .recent-tags { display: flex; flex-wrap: wrap; gap: 6px; }
+    .recent-tags span { padding: 3px 8px; border-radius: 999px; background: rgba(29,111,138,.08); color: var(--accent); font-size: 12px; font-weight: 700; }
+    .actions { display: flex; flex-wrap: wrap; gap: 8px; padding: 0 16px 16px; }
+    .quick-grid { display: grid; gap: 10px; padding: 16px; }
+    .quick-grid button { width: 100%; justify-content: flex-start; text-align: left; }
+
+    /* ── Telemetry ── */
+    .period-bar { display: flex; gap: 4px; padding: 4px; border-radius: 12px; background: rgba(29,111,138,.08); width: fit-content; }
+    .period-btn { padding: 6px 14px; border-radius: 9px; border: none; background: transparent; font: inherit; font-size: 13px; font-weight: 700; cursor: pointer; color: var(--muted); transition: background 140ms, color 140ms; }
+    .period-btn.active { background: linear-gradient(135deg,var(--accent),var(--accent-2)); color: #fff; box-shadow: 0 4px 12px rgba(29,111,138,.2); }
+    .chart-wrap { display: flex; justify-content: center; padding: 16px 16px 0; }
+    .chart-container { position: relative; width: 220px; height: 220px; }
+    .stats-grid { display: grid; grid-template-columns: repeat(5,minmax(0,1fr)); gap: 10px; padding: 16px; }
+    .stat-card { display: grid; gap: 4px; padding: 12px; border-radius: 14px; border: 1px solid rgba(18,33,45,.08); background: rgba(255,255,255,.82); text-align: center; }
+    @media (prefers-color-scheme: dark) { .stat-card { background: rgba(22,36,50,.82); border-color: rgba(200,220,240,.08); } }
+    .stat-card .stat-val { font-size: 22px; font-weight: 800; letter-spacing: -.03em; line-height: 1; }
+    .stat-card .stat-lbl { font-size: 11px; color: var(--muted); font-weight: 700; text-transform: uppercase; letter-spacing: .08em; }
+    .telemetry-row { display: grid; grid-template-columns: 1fr 100px 50px 70px 80px auto; gap: 8px; align-items: center; padding: 10px 16px; border-bottom: 1px solid var(--line); font-size: 13px; }
+    .telemetry-row.header { font-weight: 700; color: var(--muted); font-size: 12px; text-transform: uppercase; letter-spacing: .06em; background: rgba(255,255,255,.4); }
+    @media (prefers-color-scheme: dark) { .telemetry-row.header { background: rgba(15,26,36,.4); } }
+    .telemetry-row:last-child { border-bottom: none; }
+    .pagination { display: flex; align-items: center; justify-content: center; gap: 12px; padding: 14px; color: var(--muted); font-size: 13px; font-weight: 700; }
+
+    /* ── Overrides ── */
+    .override-form { display: grid; grid-template-columns: 1fr auto auto 1fr auto; gap: 10px; align-items: end; padding: 16px; }
+    .override-form label { display: grid; gap: 4px; font-size: 12px; font-weight: 700; color: var(--muted); text-transform: uppercase; letter-spacing: .06em; }
+    .override-form input, .override-form select { width: 100%; }
+    .override-table { width: 100%; border-collapse: collapse; }
+    .override-table th, .override-table td { padding: 10px 16px; text-align: left; border-bottom: 1px solid var(--line); font-size: 13px; }
+    .override-table th { font-weight: 700; color: var(--muted); font-size: 12px; text-transform: uppercase; letter-spacing: .06em; background: rgba(255,255,255,.4); }
+    @media (prefers-color-scheme: dark) { .override-table th { background: rgba(15,26,36,.4); } }
+    .override-table tr:last-child td { border-bottom: none; }
+    .filter-bar { display: flex; gap: 8px; padding: 12px 16px; border-bottom: 1px solid var(--line); flex-wrap: wrap; align-items: center; }
+    .filter-bar span { color: var(--muted); font-size: 13px; font-weight: 700; margin-right: 4px; }
+    .badge-allow { color: var(--safe); background: rgba(23,125,83,.1); padding: 3px 10px; border-radius: 999px; font-size: 12px; font-weight: 800; }
+    .badge-block { color: var(--bad); background: rgba(171,47,63,.1); padding: 3px 10px; border-radius: 999px; font-size: 12px; font-weight: 800; }
+
+    /* ── System ── */
+    .system-grid { display: grid; grid-template-columns: repeat(3,minmax(0,1fr)); gap: 12px; padding: 16px; }
+    .sys-card { padding: 16px; border-radius: 16px; border: 1px solid rgba(18,33,45,.08); background: rgba(255,255,255,.82); display: grid; gap: 6px; }
+    @media (prefers-color-scheme: dark) { .sys-card { background: rgba(22,36,50,.82); border-color: rgba(200,220,240,.08); } }
+    .sys-card .sys-name { font-size: 12px; font-weight: 800; text-transform: uppercase; letter-spacing: .08em; color: var(--muted); }
+    .sys-card .sys-status { font-size: 20px; font-weight: 800; }
+    .sys-card .sys-detail { font-size: 12px; color: var(--muted); }
+    .metrics-table { width: 100%; border-collapse: collapse; }
+    .metrics-table th, .metrics-table td { padding: 9px 16px; text-align: left; border-bottom: 1px solid var(--line); font-size: 13px; }
+    .metrics-table th { font-weight: 700; color: var(--muted); font-size: 12px; text-transform: uppercase; letter-spacing: .06em; background: rgba(255,255,255,.4); }
+    @media (prefers-color-scheme: dark) { .metrics-table th { background: rgba(15,26,36,.4); } }
+    .metrics-table tr:last-child td { border-bottom: none; }
+
+    /* ── Toast ── */
+    .toast { position: fixed; bottom: 24px; right: 24px; padding: 12px 18px; border-radius: 14px; font-size: 14px; font-weight: 700; color: #fff; box-shadow: 0 8px 24px rgba(0,0,0,.2); z-index: 100; pointer-events: none; transition: opacity 300ms; opacity: 0; }
+    .toast.show { opacity: 1; }
+    .toast.ok { background: var(--safe); }
+    .toast.err { background: var(--bad); }
+
+    /* ── Responsive ── */
+    @media (max-width: 980px) { .grid-2 { grid-template-columns: 1fr; } .hero-grid, .stats-grid { grid-template-columns: repeat(3,1fr); } .system-grid { grid-template-columns: 1fr 1fr; } }
+    @media (max-width: 720px) {
+      .shell { width: calc(100vw - 20px); padding-top: 10px; }
+      header { padding: 16px; border-radius: 20px; }
+      .toolbar { grid-template-columns: 1fr; }
+      .hero-grid, .stats-grid, .subgrid { grid-template-columns: 1fr 1fr; }
+      .system-grid { grid-template-columns: 1fr; }
+      .status-pills { justify-content: flex-start; }
+      .override-form { grid-template-columns: 1fr 1fr; }
+      .telemetry-row { grid-template-columns: 1fr 80px 50px; }
+      .telemetry-row > *:nth-child(n+4) { display: none; }
+    /* ── Custom Group Cards & Modal ── */
+    .group-card {
+      padding: 16px; border-radius: 18px; border: 1px solid rgba(18,33,45,.08);
+      background: rgba(255,255,255,.9); display: flex; flex-direction: column; gap: 12px;
+      box-shadow: 0 4px 18px rgba(0,0,0,.03); transition: transform 200ms ease, box-shadow 200ms ease;
+    }
+    @media (prefers-color-scheme: dark) {
+      .group-card { background: rgba(22,36,50,.9); border-color: rgba(200,220,240,.08); }
+    }
+    .group-card:hover {
+      transform: translateY(-2px);
+      box-shadow: 0 8px 24px rgba(0,0,0,.06);
+    }
+    .group-card .grp-header { display: flex; justify-content: space-between; align-items: start; }
+    .group-card .grp-name { font-size: 16px; font-weight: 800; color: var(--accent); }
+    .group-card .grp-desc { font-size: 13px; color: var(--muted); margin: 0; min-height: 38px; }
+    .group-card .grp-badges { display: flex; flex-wrap: wrap; gap: 6px; }
+    .group-card .grp-badge { font-size: 11px; font-weight: 800; text-transform: uppercase; padding: 3px 8px; border-radius: 999px; background: rgba(29,111,138,.08); color: var(--accent); }
+    .group-card .grp-features { display: flex; gap: 8px; font-size: 12px; font-weight: 700; color: var(--muted); }
+    .group-card .grp-features span.active { color: var(--safe); }
+    .group-card .grp-actions { display: flex; gap: 8px; margin-top: auto; border-top: 1px solid var(--line); padding-top: 10px; }
+
+    /* Modal Overlay & Card Container */
+    .modal-overlay {
+      position: fixed; top: 0; left: 0; width: 100vw; height: 100vh;
+      background: rgba(15,26,36,.6); backdrop-filter: blur(8px);
+      display: flex; align-items: center; justify-content: center; z-index: 1000;
+      opacity: 0; pointer-events: none; transition: opacity 240ms ease;
+    }
+    .modal-overlay.active { opacity: 1; pointer-events: auto; }
+    .modal-card {
+      width: min(500px, 90vw); background: var(--panel-strong); border: 1px solid var(--line);
+      border-radius: 24px; box-shadow: var(--shadow); display: flex; flex-direction: column;
+      transform: translateY(20px); transition: transform 240ms cubic-bezier(0.16, 1, 0.3, 1);
+    }
+    .modal-overlay.active .modal-card { transform: translateY(0); }
+    .modal-head { display: flex; justify-content: space-between; align-items: center; padding: 16px 20px; border-bottom: 1px solid var(--line); }
+    .modal-head h3 { margin: 0; font-size: 14px; font-weight: 800; text-transform: uppercase; letter-spacing: .06em; color: var(--muted); }
+    .modal-close { background: transparent; color: var(--muted); box-shadow: none; font-size: 20px; border: 0; min-height: auto; padding: 0 4px; cursor: pointer; }
+    .modal-body { padding: 20px; display: flex; flex-direction: column; gap: 16px; overflow-y: auto; max-height: 70vh; }
+    .modal-body label { display: flex; flex-direction: column; gap: 6px; font-size: 12px; font-weight: 700; color: var(--muted); text-transform: uppercase; letter-spacing: .06em; }
+    .modal-checkboxes { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin-top: 4px; }
+    .modal-checkboxes label { flex-direction: row; align-items: center; gap: 8px; font-size: 13px; text-transform: none; color: var(--ink); font-weight: 600; cursor: pointer; }
+    .modal-checkboxes input { min-height: auto; width: 18px; height: 18px; margin: 0; cursor: pointer; }
+    .modal-foot { padding: 16px 20px; border-top: 1px solid var(--line); display: flex; justify-content: flex-end; gap: 10px; }
+  </style>
+</head>
+<body>
+<div class="shell">
+
+  <header>
+    <div class="hero">
+      <div class="title">
+        <div class="eyebrow">OPEX-first local control plane</div>
+        <h1>Safe Road Dashboard</h1>
+        <p class="subtitle">Analyze domains, manage overrides, track telemetry and monitor system health — all from one lightweight control plane.</p>
+      </div>
+      <div class="status-pills">
+        <span class="chip" id="api-status"><strong>core-api</strong> checking</span>
+        <span class="chip" id="cache-state"><strong>cache</strong> idle</span>
+        <span class="chip" id="rl-status"><strong>rate limit</strong> —</span>
+      </div>
+    </div>
+    <div class="hero-grid">
+      <div class="metric"><strong id="metric-total">0</strong><span>Total (24h)</span></div>
+      <div class="metric"><strong id="metric-safe">0</strong><span>Safe</span></div>
+      <div class="metric"><strong id="metric-suspicious">0</strong><span>Suspicious</span></div>
+      <div class="metric"><strong id="metric-malicious">0</strong><span>Malicious</span></div>
+      <div class="metric"><strong id="metric-cache">0</strong><span>Cache hits</span></div>
+    </div>
+  </header>
+
+  <!-- Tab Navigation -->
+  <nav class="tabs" role="tablist">
+    <button class="tab-btn active" role="tab" data-tab="analysis" id="tab-btn-analysis">🔍 Analysis</button>
+    <button class="tab-btn" role="tab" data-tab="telemetry" id="tab-btn-telemetry">📊 Telemetry</button>
+    <button class="tab-btn" role="tab" data-tab="overrides" id="tab-btn-overrides">🛡 Overrides</button>
+    <button class="tab-btn" role="tab" data-tab="clients" id="tab-btn-clients">👥 Clients & Policies</button>
+    <button class="tab-btn" role="tab" data-tab="system" id="tab-btn-system">⚙️ System</button>
+    <button class="tab-btn logout-btn" id="logout-btn" onclick="handleLogout()">🚪 Đăng xuất</button>
+  </nav>
+
+  <!-- ══════════════════════════════════════════════════════════════════════ -->
+  <!-- Tab: Analysis                                                         -->
+  <!-- ══════════════════════════════════════════════════════════════════════ -->
+  <div class="tab-content active" id="tab-analysis">
+    <main>
+      <form class="toolbar" id="analyze-form">
+        <input id="domain-input" name="domain" autocomplete="off" spellcheck="false" placeholder="secure-login-wallet-example.com">
+        <button id="analyze-btn" type="submit">Analyze</button>
+      </form>
+
+      <div class="actions" id="quick-actions">
+        <button class="ghost" type="button" data-domain="example.com">example.com</button>
+        <button class="ghost" type="button" data-domain="secure-login-wallet-example.com">Suspicious sample</button>
+        <button class="ghost" type="button" data-domain="login.bank-verify-support.com">Phishing-style sample</button>
+        <button class="ghost" type="button" data-domain="xn--pple-43d.com">Punycode sample</button>
+      </div>
+
+      <div class="grid-2">
+        <section class="panel">
+          <div class="panel-head"><h2>Live result</h2><span id="result-state">waiting</span></div>
+          <div id="result"><div class="empty">No result yet. Run a domain through the analyzer.</div></div>
+        </section>
+        <div class="stack">
+          <section class="panel">
+            <div class="panel-head"><h2>Recent activity</h2><span id="recent-count">0</span></div>
+            <div class="recent-list" id="recent"><div class="empty">No cached history.</div></div>
+          </section>
+          <section class="panel">
+            <div class="panel-head"><h2>Quick checks</h2><span>local only</span></div>
+            <div class="quick-grid">
+              <div class="empty" style="padding:0">Polls health and recent activity every 15 seconds.</div>
+            </div>
+          </section>
+        </div>
+      </div>
+    </main>
+  </div>
+
+  <!-- ══════════════════════════════════════════════════════════════════════ -->
+  <!-- Tab: Telemetry                                                        -->
+  <!-- ══════════════════════════════════════════════════════════════════════ -->
+  <div class="tab-content" id="tab-telemetry">
+    <main>
+      <div class="panel">
+        <div class="panel-head">
+          <h2>Verdict Distribution</h2>
+          <div class="period-bar">
+            <button class="period-btn active" data-period="24h">24h</button>
+            <button class="period-btn" data-period="7d">7d</button>
+            <button class="period-btn" data-period="30d">30d</button>
+          </div>
+        </div>
+        <div class="stats-grid">
+          <div class="stat-card"><div class="stat-val" id="st-total">—</div><div class="stat-lbl">Total</div></div>
+          <div class="stat-card"><div class="stat-val SAFE" id="st-safe">—</div><div class="stat-lbl">Safe</div></div>
+          <div class="stat-card"><div class="stat-val SUSPICIOUS" id="st-suspicious">—</div><div class="stat-lbl">Suspicious</div></div>
+          <div class="stat-card"><div class="stat-val MALICIOUS" id="st-malicious">—</div><div class="stat-lbl">Malicious</div></div>
+          <div class="stat-card"><div class="stat-val" id="st-cache">—</div><div class="stat-lbl">Cache hits</div></div>
+        </div>
+        <div class="chart-wrap">
+          <div class="chart-container"><canvas id="verdict-chart"></canvas></div>
+        </div>
+        <div style="padding:12px 16px 16px;text-align:center">
+          <span id="chart-legend" style="color:var(--muted);font-size:13px">Loading...</span>
+        </div>
+      </div>
+
+      <div class="panel">
+        <div class="panel-head"><h2>Analysis History</h2><span id="telem-info">—</span></div>
+        <div class="telemetry-row header">
+          <div>Domain</div><div>Verdict</div><div>Score</div><div>Source</div><div>Time</div><div></div>
+        </div>
+        <div id="telem-body"><div class="empty">Loading...</div></div>
+        <div class="pagination">
+          <button class="ghost btn-sm" id="telem-prev" disabled>← Prev</button>
+          <span id="telem-page">Page 1</span>
+          <button class="ghost btn-sm" id="telem-next">Next →</button>
+        </div>
+      </div>
+    </main>
+  </div>
+
+  <!-- ══════════════════════════════════════════════════════════════════════ -->
+  <!-- Tab: Overrides                                                        -->
+  <!-- ══════════════════════════════════════════════════════════════════════ -->
+  <div class="tab-content" id="tab-overrides">
+    <main>
+      <div class="panel">
+        <div class="panel-head"><h2>Add Override</h2></div>
+        <form class="override-form" id="override-form">
+          <label>Domain<input id="ov-domain" type="text" placeholder="evil.com" required autocomplete="off" spellcheck="false"></label>
+          <label>Action<select id="ov-action"><option value="block">Block</option><option value="allow">Allow</option></select></label>
+          <label>&nbsp;<button id="ov-submit" type="submit" class="btn-block">Add Override</button></label>
+          <label style="grid-column:span 2">Reason (optional)<input id="ov-reason" type="text" placeholder="e.g. phishing confirmed"></label>
+        </form>
+      </div>
+
+      <div class="panel">
+        <div class="panel-head"><h2>Override List</h2><span id="ov-count">0 overrides</span></div>
+        <div class="filter-bar">
+          <span>Filter:</span>
+          <button class="ghost btn-sm ov-filter active" data-filter="">All</button>
+          <button class="ghost btn-sm ov-filter" data-filter="allow">Allow only</button>
+          <button class="ghost btn-sm ov-filter" data-filter="block">Block only</button>
+        </div>
+        <div id="ov-table-wrap">
+          <table class="override-table">
+            <thead><tr><th>Domain</th><th>Action</th><th>Reason</th><th>Updated</th><th></th></tr></thead>
+            <tbody id="ov-tbody"><tr><td colspan="5" class="empty">No overrides.</td></tr></tbody>
+          </table>
+        </div>
+      </div>
+    </main>
+  </div>
+
+  <!-- ══════════════════════════════════════════════════════════════════════ -->
+  <!-- Tab: System                                                           -->
+  <!-- ══════════════════════════════════════════════════════════════════════ -->
+  <div class="tab-content" id="tab-system">
+    <main>
+      <div class="panel">
+        <div class="panel-head"><h2>Service Health</h2><span id="sys-uptime">—</span></div>
+        <div class="system-grid">
+          <div class="sys-card">
+            <div class="sys-name">core-api</div>
+            <div class="sys-status" id="sys-api-status">—</div>
+            <div class="sys-detail" id="sys-api-detail">—</div>
+          </div>
+          <div class="sys-card">
+            <div class="sys-name">Redis Cache</div>
+            <div class="sys-status" id="sys-redis-status">—</div>
+            <div class="sys-detail" id="sys-redis-detail">—</div>
+          </div>
+          <div class="sys-card">
+            <div class="sys-name">Enrichment (TLS+WHOIS)</div>
+            <div class="sys-status" id="sys-enrich-status">—</div>
+            <div class="sys-detail" id="sys-enrich-detail">TLS & WHOIS analysis</div>
+          </div>
+        </div>
+      </div>
+
+      <div class="panel">
+        <div class="panel-head"><h2>Request Metrics</h2><span id="sys-total-reqs">—</span></div>
+        <table class="metrics-table">
+          <thead><tr><th>Endpoint</th><th>Requests</th><th>Avg Latency</th><th>Max Latency</th><th>Last Status</th></tr></thead>
+          <tbody id="metrics-tbody"><tr><td colspan="5" class="empty">Loading...</td></tr></tbody>
+        </table>
+      </div>
+
+      <div class="panel" style="margin-top:16px">
+        <div class="panel-head"><h2>Agent Engine</h2><span id="agent-overall-status">—</span></div>
+        <div id="agent-panel-body" style="padding:16px">
+          <div class="empty">Loading Agent status...</div>
+        </div>
+      </div>
+    </main>
+  </div>
+
+  <!-- ══════════════════════════════════════════════════════════════════════ -->
+  <!-- Tab: Clients & Policies                                               -->
+  <!-- ══════════════════════════════════════════════════════════════════════ -->
+  <div class="tab-content" id="tab-clients">
+    <main>
+      <!-- Section 1: Groups Configuration -->
+      <div class="panel">
+        <div class="panel-head">
+          <h2>Policy Groups</h2>
+          <button class="ghost btn-sm" id="btn-add-group" onclick="openNewGroupModal()">+ New Group</button>
+        </div>
+        <div class="stats-grid" id="groups-grid" style="grid-template-columns: repeat(auto-fill, minmax(280px, 1fr)); gap: 16px; padding: 16px;">
+          <!-- Render groups here dynamically -->
+        </div>
+      </div>
+
+      <!-- Section 2: Client Mappings -->
+      <div class="panel" style="margin-top: 16px;">
+        <div class="panel-head">
+          <h2>Client Mappings</h2>
+        </div>
+        <form class="toolbar" id="mapping-form" style="display: grid; grid-template-columns: 150px 1fr 200px auto; gap: 10px; padding: 16px;" onsubmit="handleMappingSubmit(event)">
+          <select id="map-type-input">
+            <option value="ip">IP Address</option>
+            <option value="cidr">CIDR Range</option>
+            <option value="client_id">DoH Client ID</option>
+          </select>
+          <input id="map-value-input" autocomplete="off" placeholder="e.g. 192.168.1.100 or device-kids">
+          <select id="map-group-input">
+            <!-- Render groups options dynamically -->
+          </select>
+          <button id="btn-add-mapping" type="submit">Add Mapping</button>
+        </form>
+        <table class="override-table">
+          <thead><tr><th>Type</th><th>Value</th><th>Policy Group</th><th>Mapped At</th><th></th></tr></thead>
+          <tbody id="mappings-tbody"><tr><td colspan="5" class="empty">No client mappings.</td></tr></tbody>
+        </table>
+      </div>
+
+      <!-- Section 3: Group Overrides -->
+      <div class="panel" style="margin-top: 16px;">
+        <div class="panel-head">
+          <h2>Group Overrides</h2>
+        </div>
+        <div class="filter-bar">
+          <span>Select Group:</span>
+          <select id="override-group-select" style="min-width: 200px;" onchange="loadGroupOverrides()">
+            <!-- Render group options dynamically -->
+          </select>
+        </div>
+        <form class="toolbar" id="group-override-form" style="display: grid; grid-template-columns: 1fr 120px 1fr auto; gap: 10px; padding: 16px;" onsubmit="handleGroupOverrideSubmit(event)">
+          <input id="go-domain-input" autocomplete="off" placeholder="restricted-domain.com">
+          <select id="go-action-input">
+            <option value="block">Block</option>
+            <option value="allow">Allow</option>
+          </select>
+          <input id="go-reason-input" autocomplete="off" placeholder="Reason (e.g. Parental control)">
+          <button id="btn-add-group-override" type="submit">Add Override</button>
+        </form>
+        <table class="override-table">
+          <thead><tr><th>Domain</th><th>Action</th><th>Reason</th><th>Updated</th><th></th></tr></thead>
+          <tbody id="group-overrides-tbody"><tr><td colspan="5" class="empty">Select a group to load overrides.</td></tr></tbody>
+        </table>
+      </div>
+    </main>
+  </div>
+
+</div><!-- .shell -->
+
+<!-- Modal Popup for Create/Edit Group -->
+<div class="modal-overlay" id="group-modal">
+  <div class="modal-card">
+    <div class="modal-head">
+      <h3 id="modal-title">New Policy Group</h3>
+      <button class="modal-close" onclick="closeGroupModal()">✕</button>
+    </div>
+    <form id="group-form" onsubmit="handleGroupSubmit(event)">
+      <input type="hidden" id="group-id-input">
+      <div class="modal-body">
+        <label>
+          Group Name
+          <input type="text" id="group-name-input" required placeholder="e.g. Kids, Server Room">
+        </label>
+        <label>
+          Description
+          <input type="text" id="group-desc-input" placeholder="e.g. Policy for kids devices">
+        </label>
+        <label style="text-transform: none;">
+          Block Categories
+          <div class="modal-checkboxes">
+            <label><input type="checkbox" name="block-cat" value="adult"> Adult Content</label>
+            <label><input type="checkbox" name="block-cat" value="gambling"> Gambling</label>
+            <label><input type="checkbox" name="block-cat" value="social_media"> Social Media</label>
+            <label><input type="checkbox" name="block-cat" value="gaming"> Gaming</label>
+            <label><input type="checkbox" name="block-cat" value="advertising"> Advertising</label>
+          </div>
+        </label>
+        <label style="text-transform: none;">
+          Security Features
+          <div class="modal-checkboxes">
+            <label><input type="checkbox" id="group-phish-input"> Strict Phishing</label>
+            <label><input type="checkbox" id="group-malware-input"> Strict Malware</label>
+          </div>
+        </label>
+      </div>
+      <div class="modal-foot">
+        <button type="button" class="ghost" onclick="closeGroupModal()">Cancel</button>
+        <button type="submit" id="btn-save-group">Save Group</button>
+      </div>
+    </form>
+  </div>
+</div>
+
+<div class="toast" id="toast"></div>
+
+<!-- Chart.js from CDN — graceful degradation if unavailable -->
+<script>
+window.CHARTJS_AVAILABLE = false;
+</script>
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4/dist/chart.umd.min.js"
+        onload="window.CHARTJS_AVAILABLE=true"
+        onerror="console.warn('Chart.js unavailable; charts disabled')"></script>
+
+<script>
+// ── State ─────────────────────────────────────────────────────────────────────
+const state = {
+  activeTab: 'analysis',
+  latest: null,
+  recent: [],
+  telemetry: { stats: {}, items: [], page: 0, pageSize: 20, period: '24h', total: 0 },
+  overrides: { items: [], filter: '' },
+  system: { health: {}, metrics: {}, status: {} },
+  chart: null,
+  clients: { groups: [], mappings: [], overrides: [] },
+};
+
+// ── Element refs ──────────────────────────────────────────────────────────────
+const $ = id => document.getElementById(id);
+const analyzeForm     = $('analyze-form');
+const domainInput     = $('domain-input');
+const analyzeBtn      = $('analyze-btn');
+const resultEl        = $('result');
+const recentEl        = $('recent');
+const recentCount     = $('recent-count');
+const cacheState      = $('cache-state');
+const apiStatus       = $('api-status');
+const rlStatus        = $('rl-status');
+const resultState     = $('result-state');
+const metricTotal     = $('metric-total');
+const metricSafe      = $('metric-safe');
+const metricSusp      = $('metric-suspicious');
+const metricMal       = $('metric-malicious');
+const metricCache     = $('metric-cache');
+const quickActions    = $('quick-actions');
+const toast           = $('toast');
+
+// ── Routing / Tab switching ───────────────────────────────────────────────────
+document.querySelectorAll('.tab-btn').forEach(btn => {
+  btn.addEventListener('click', () => switchTab(btn.dataset.tab));
+});
+
+function switchTab(name) {
+  state.activeTab = name;
+  document.querySelectorAll('.tab-btn').forEach(b => b.classList.toggle('active', b.dataset.tab === name));
+  document.querySelectorAll('.tab-content').forEach(c => c.classList.toggle('active', c.id === 'tab-' + name));
+  loadTabData(name);
+}
+
+async function loadTabData(name) {
+  switch(name) {
+    case 'analysis':  await loadRecent(); break;
+    case 'telemetry': await loadTelemetry(); break;
+    case 'overrides': await loadOverrides(); break;
+    case 'system':    await loadSystem(); break;
+    case 'clients':   await loadClientsTab(); break;
+  }
+}
+
+// ── Analysis tab ──────────────────────────────────────────────────────────────
+analyzeForm.addEventListener('submit', async e => {
+  e.preventDefault();
+  const d = domainInput.value.trim();
+  if (!d) return;
+  await analyzeDomain(d);
+});
+quickActions.addEventListener('click', async e => {
+  const btn = e.target.closest('button[data-domain]');
+  if (!btn) return;
+  domainInput.value = btn.dataset.domain;
+  await analyzeDomain(btn.dataset.domain);
+});
+
+async function analyzeDomain(domain) {
+  analyzeBtn.disabled = true;
+  resultState.textContent = 'analyzing…';
+  try {
+    const r = await fetch('/v1/analyze', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ domain }),
+    });
+    const payload = await r.json();
+    state.latest = payload;
+    renderResult(payload);
+    await loadRecent();
+    resultState.textContent = 'fresh result';
+  } catch {
+    resultEl.innerHTML = '<div class="empty">Request failed.</div>';
+    resultState.textContent = 'request failed';
+  } finally {
+    analyzeBtn.disabled = false;
+  }
+}
+
+async function loadRecent() {
+  try {
+    const r = await fetch('/v1/analysis/recent');
+    const payload = await r.json();
+    const items = payload.items || [];
+    state.recent = items;
+    recentCount.textContent = items.length;
+    recentEl.innerHTML = items.length
+      ? items.map(renderRecentItem).join('')
+      : '<div class="empty">No cached history.</div>';
+    if (!state.latest && items.length) renderResult(items[0]);
+  } catch {
+    recentEl.innerHTML = '<div class="empty">Recent unavailable.</div>';
+  }
+}
+
+function renderResult(item) {
+  cacheState.innerHTML = item.cache_hit ? '<strong>cache</strong> hit' : '<strong>cache</strong> fresh';
+  const reasons = (item.reasons && item.reasons.length)
+    ? '<ul class="reasons">' + item.reasons.map(r => '<li>' + esc(r) + '</li>').join('') + '</ul>'
+    : '<ul class="reasons"><li>no risk signals</li></ul>';
+  resultEl.innerHTML =
+    '<div class="result-body">' +
+      '<div class="verdict-banner">' +
+        '<div class="verdict-row">' +
+          '<strong class="' + item.verdict + '">' + esc(item.verdict) + '</strong>' +
+          '<span class="verdict-meta">' + Math.round(item.confidence * 100) + '% confidence &middot; score ' + item.score + '</span>' +
+        '</div>' +
+        '<span class="verdict ' + item.verdict + '">' + esc(item.verdict) + '</span>' +
+      '</div>' +
+      '<div class="subgrid">' +
+        '<div class="subcard"><span>Domain</span><strong>' + esc(item.domain) + '</strong></div>' +
+        '<div class="subcard"><span>Analyzed</span><strong>' + fmtTime(item.analyzed_at) + '</strong></div>' +
+        '<div class="subcard"><span>Source</span><strong>' + (item.cache_hit ? 'cache' : 'fresh') + '</strong></div>' +
+      '</div>' +
+      '<dl><dt>Signals</dt><dd>' + reasons + '</dd></dl>' +
+    '</div>';
+}
+
+function renderRecentItem(item) {
+  const tags = (item.reasons && item.reasons.length)
+    ? item.reasons.slice(0, 3).map(r => '<span>' + esc(r) + '</span>').join('')
+    : '<span>no signals</span>';
+  return '<article class="recent-item">' +
+    '<div class="recent-top"><div class="recent-domain">' + esc(item.domain) + '</div><span class="verdict ' + item.verdict + '">' + esc(item.verdict) + '</span></div>' +
+    '<div class="recent-meta"><span>Score ' + item.score + '</span><span>' + Math.round(item.confidence * 100) + '%</span><span>' + fmtTime(item.analyzed_at) + '</span></div>' +
+    '<div class="recent-tags">' + tags + '</div>' +
+    '</article>';
+}
+
+// ── Telemetry tab ─────────────────────────────────────────────────────────────
+document.querySelectorAll('.period-btn').forEach(btn => {
+  btn.addEventListener('click', () => {
+    document.querySelectorAll('.period-btn').forEach(b => b.classList.remove('active'));
+    btn.classList.add('active');
+    state.telemetry.period = btn.dataset.period;
+    state.telemetry.page = 0;
+    loadTelemetry();
+  });
+});
+$('telem-prev').addEventListener('click', () => {
+  if (state.telemetry.page > 0) { state.telemetry.page--; loadTelemetryItems(); }
+});
+$('telem-next').addEventListener('click', () => {
+  state.telemetry.page++;
+  loadTelemetryItems();
+});
+
+async function loadTelemetry() {
+  await Promise.all([loadTelemetryStats(), loadTelemetryItems()]);
+}
+
+async function loadTelemetryStats() {
+  try {
+    const r = await fetch('/v1/telemetry/stats?period=' + state.telemetry.period);
+    const s = await r.json();
+    state.telemetry.stats = s;
+    $('st-total').textContent      = (s.total || 0).toLocaleString();
+    $('st-safe').textContent       = (s.safe || 0).toLocaleString();
+    $('st-suspicious').textContent = (s.suspicious || 0).toLocaleString();
+    $('st-malicious').textContent  = (s.malicious || 0).toLocaleString();
+    $('st-cache').textContent      = (s.cache_hits || 0).toLocaleString();
+    // Update header metrics too
+    metricTotal.textContent = (s.total || 0).toLocaleString();
+    metricSafe.textContent  = (s.safe || 0).toLocaleString();
+    metricSusp.textContent  = (s.suspicious || 0).toLocaleString();
+    metricMal.textContent   = (s.malicious || 0).toLocaleString();
+    metricCache.textContent = (s.cache_hits || 0).toLocaleString();
+    renderChart(s);
+  } catch {
+    // fail silently
+  }
+}
+
+async function loadTelemetryItems() {
+  const offset = state.telemetry.page * state.telemetry.pageSize;
+  try {
+    const r = await fetch('/v1/telemetry/recent?limit=' + state.telemetry.pageSize + '&offset=' + offset);
+    const payload = await r.json();
+    const items = payload.items || [];
+    state.telemetry.items = items;
+    $('telem-info').textContent = 'Page ' + (state.telemetry.page + 1);
+    $('telem-page').textContent = 'Page ' + (state.telemetry.page + 1);
+    $('telem-prev').disabled = state.telemetry.page === 0;
+    $('telem-next').disabled = items.length < state.telemetry.pageSize;
+    $('telem-body').innerHTML = items.length
+      ? items.map(renderTelemRow).join('')
+      : '<div class="empty">No telemetry data for this period.</div>';
+  } catch {
+    $('telem-body').innerHTML = '<div class="empty">Telemetry unavailable.</div>';
+  }
+}
+
+function renderTelemRow(item) {
+  return '<div class="telemetry-row">' +
+    '<div style="overflow-wrap:anywhere;font-weight:700">' + esc(item.domain) + '</div>' +
+    '<div><span class="verdict ' + item.verdict + '">' + esc(item.verdict) + '</span></div>' +
+    '<div>' + item.score + '</div>' +
+    '<div style="color:var(--muted)">' + esc(item.source || '—') + '</div>' +
+    '<div style="color:var(--muted)">' + fmtTime(item.analyzed_at) + '</div>' +
+    '<div></div>' +
+    '</div>';
+}
+
+function renderChart(s) {
+  if (!window.CHARTJS_AVAILABLE) {
+    $('chart-legend').textContent = 'Chart.js unavailable (CDN offline).';
+    return;
+  }
+  const safe    = s.safe || 0;
+  const susp    = s.suspicious || 0;
+  const mal     = s.malicious || 0;
+  const total   = safe + susp + mal || 1;
+  $('chart-legend').innerHTML =
+    '<span style="color:var(--safe)">■ Safe ' + pct(safe,total) + '</span> &nbsp; ' +
+    '<span style="color:var(--warn)">■ Suspicious ' + pct(susp,total) + '</span> &nbsp; ' +
+    '<span style="color:var(--bad)">■ Malicious ' + pct(mal,total) + '</span>';
+  const canvas = $('verdict-chart');
+  if (state.chart) { state.chart.destroy(); state.chart = null; }
+  state.chart = new Chart(canvas, {
+    type: 'doughnut',
+    data: {
+      labels: ['Safe', 'Suspicious', 'Malicious'],
+      datasets: [{ data: [safe, susp, mal], backgroundColor: ['#177d53','#a96d18','#ab2f3f'], borderWidth: 0, hoverOffset: 6 }],
+    },
+    options: {
+      cutout: '68%',
+      plugins: { legend: { display: false }, tooltip: { callbacks: { label: ctx => ctx.label + ': ' + ctx.parsed.toLocaleString() } } },
+      animation: { duration: 400 },
+    },
+  });
+}
+
+// ── Overrides tab ─────────────────────────────────────────────────────────────
+document.querySelectorAll('.ov-filter').forEach(btn => {
+  btn.addEventListener('click', () => {
+    document.querySelectorAll('.ov-filter').forEach(b => b.classList.remove('active'));
+    btn.classList.add('active');
+    state.overrides.filter = btn.dataset.filter;
+    renderOverrides();
+  });
+});
+
+const ovAction = $('ov-action');
+ovAction.addEventListener('change', () => {
+  $('ov-submit').className = 'btn-sm ' + (ovAction.value === 'block' ? 'btn-block' : 'btn-allow');
+  $('ov-submit').textContent = ovAction.value === 'block' ? '+ Block' : '+ Allow';
+});
+
+$('override-form').addEventListener('submit', async e => {
+  e.preventDefault();
+  const domain = $('ov-domain').value.trim();
+  const action = $('ov-action').value;
+  const reason = $('ov-reason').value.trim();
+  if (!domain) return;
+  try {
+    const r = await fetch('/v1/overrides', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ domain, action, reason }),
+    });
+    if (!r.ok) { const err = await r.json(); throw new Error(err.error || 'Unknown error'); }
+    showToast('Override saved: ' + domain + ' → ' + action, 'ok');
+    $('ov-domain').value = '';
+    $('ov-reason').value = '';
+    await loadOverrides();
+  } catch(err) {
+    showToast('Error: ' + err.message, 'err');
+  }
+});
+
+async function loadOverrides() {
+  try {
+    const r = await fetch('/v1/overrides');
+    const payload = await r.json();
+    state.overrides.items = payload.items || [];
+    renderOverrides();
+  } catch {
+    $('ov-tbody').innerHTML = '<tr><td colspan="5" class="empty">Overrides unavailable.</td></tr>';
+  }
+}
+
+function renderOverrides() {
+  const filter = state.overrides.filter;
+  const items  = filter ? state.overrides.items.filter(i => i.action === filter) : state.overrides.items;
+  $('ov-count').textContent = items.length + ' override' + (items.length === 1 ? '' : 's');
+  $('ov-tbody').innerHTML = items.length
+    ? items.map(renderOverrideRow).join('')
+    : '<tr><td colspan="5" class="empty">No overrides match this filter.</td></tr>';
+}
+
+function renderOverrideRow(item) {
+  const badgeClass = item.action === 'block' ? 'badge-block' : 'badge-allow';
+  return '<tr>' +
+    '<td style="font-weight:700">' + esc(item.domain) + '</td>' +
+    '<td><span class="' + badgeClass + '">' + esc(item.action) + '</span></td>' +
+    '<td style="color:var(--muted)">' + esc(item.reason || '—') + '</td>' +
+    '<td style="color:var(--muted)">' + fmtTime(item.updated_at) + '</td>' +
+    '<td><button class="ghost btn-sm btn-danger" onclick="deleteOverride(' + JSON.stringify(item.domain) + ')">Delete</button></td>' +
+    '</tr>';
+}
+
+async function deleteOverride(domain) {
+  if (!confirm('Delete override for ' + domain + '?')) return;
+  try {
+    const r = await fetch('/v1/overrides?domain=' + encodeURIComponent(domain), { method: 'DELETE' });
+    if (!r.ok) { const err = await r.json(); throw new Error(err.error || 'Unknown error'); }
+    showToast('Override deleted: ' + domain, 'ok');
+    await loadOverrides();
+  } catch(err) {
+    showToast('Error: ' + err.message, 'err');
+  }
+}
+
+// ── System tab ────────────────────────────────────────────────────────────────
+async function loadSystem() {
+  await Promise.all([checkHealth(), loadMetrics(), loadAgentStatus()]);
+}
+
+async function checkHealth() {
+  try {
+    const [hRes, sRes] = await Promise.all([fetch('/healthz'), fetch('/')]);
+    const health = await hRes.json();
+    const status = await sRes.json();
+    const ok = health.status === 'ok';
+    apiStatus.className = ok ? 'chip ok' : 'chip warn';
+    apiStatus.innerHTML = '<strong>core-api</strong> ' + (ok ? 'healthy' : 'limited');
+    $('sys-api-status').textContent = ok ? '● Online' : '⚠ Limited';
+    $('sys-api-status').style.color = ok ? 'var(--safe)' : 'var(--warn)';
+    $('sys-api-detail').textContent = 'mode: ' + (status.mode || 'api');
+    // Redis
+    const redis = status.redis || {};
+    const redisOk = redis.status === 'ok';
+    $('sys-redis-status').textContent = redis.configured ? (redisOk ? '● Connected' : '⚠ Unavailable') : '○ Disabled';
+    $('sys-redis-status').style.color = redis.configured ? (redisOk ? 'var(--safe)' : 'var(--warn)') : 'var(--muted)';
+    $('sys-redis-detail').textContent = redis.configured ? (redis.error || 'operational') : 'no Redis configured';
+    cacheState.innerHTML = redis.configured && redisOk ? '<strong>cache</strong> ok' : '<strong>cache</strong> offline';
+    // Enrichment assumed enabled by default
+    $('sys-enrich-status').textContent = '● Enabled';
+    $('sys-enrich-status').style.color = 'var(--safe)';
+  } catch {
+    apiStatus.className = 'chip bad';
+    apiStatus.innerHTML = '<strong>core-api</strong> offline';
+    $('sys-api-status').textContent = '✕ Offline';
+    $('sys-api-status').style.color = 'var(--bad)';
+  }
+}
+
+async function loadMetrics() {
+  try {
+    const r = await fetch('/metrics');
+    const data = await r.json();
+    const snap = data.metrics || {};
+    const uptime = snap.uptime_seconds || 0;
+    $('sys-uptime').textContent = 'Uptime: ' + fmtUptime(uptime);
+    const summary = snap.request_summary || {};
+    const rows = Object.entries(summary).map(([key, val]) => {
+      const avg = val.count ? Math.round(val.total_duration_ms / val.count) : 0;
+      return '<tr>' +
+        '<td style="font-weight:700">' + esc(key) + '</td>' +
+        '<td>' + (val.count || 0).toLocaleString() + '</td>' +
+        '<td>' + avg + 'ms</td>' +
+        '<td>' + (val.max_duration_ms || 0) + 'ms</td>' +
+        '<td>' + (val.last_status || '—') + '</td>' +
+        '</tr>';
+    });
+    const totalReqs = Object.values(summary).reduce((s, v) => s + (v.count || 0), 0);
+    $('sys-total-reqs').textContent = totalReqs.toLocaleString() + ' total requests';
+    rlStatus.innerHTML = '<strong>rate limit</strong> on';
+    $('metrics-tbody').innerHTML = rows.length ? rows.join('') : '<tr><td colspan="5" class="empty">No metrics yet.</td></tr>';
+  } catch {
+    $('metrics-tbody').innerHTML = '<tr><td colspan="5" class="empty">Metrics unavailable.</td></tr>';
+  }
+}
+
+async function loadAgentStatus() {
+  try {
+    const r = await fetch('/v1/agent/status');
+    const s = await r.json();
+    const overall = $('agent-overall-status');
+    if (!s.enabled) {
+      overall.textContent = 'Disabled';
+      overall.style.color = 'var(--muted)';
+      $('agent-panel-body').innerHTML = '<div class="empty">Agent Engine is disabled (SAFE_ROAD_AGENT_ENABLED=false).</div>';
+      return;
+    }
+    overall.textContent = 'Active';
+    overall.style.color = 'var(--safe)';
+    
+    const tasks = s.tasks || [];
+    if (!tasks.length) {
+      $('agent-panel-body').innerHTML = '<div class="empty">No tasks registered in Agent Engine.</div>';
+      return;
+    }
+    
+    const rows = tasks.map(t => {
+      const stateClass = t.state === 'running' ? 'badge-allow' : (t.state === 'failed' ? 'badge-block' : '');
+      const stateLabel = t.state === 'running' ? 'Running' : (t.state === 'failed' ? 'Failed' : 'Idle');
+      const lastErr = t.last_error ? `<span style="color:var(--bad); font-size: 12px;">${esc(t.last_error)}</span>` : '—';
+      
+      return '<tr>' +
+        '<td style="font-weight:700">' + esc(t.name) + '</td>' +
+        '<td><span class="' + stateClass + '">' + stateLabel + '</span></td>' +
+        '<td>' + esc(t.interval) + '</td>' +
+        '<td>' + fmtTime(t.last_run) + '</td>' +
+        '<td>' + fmtTime(t.next_run) + '</td>' +
+        '<td>' + t.run_count + ' / ' + t.error_count + '</td>' +
+        '<td style="max-width:200px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;" title="' + esc(t.last_error) + '">' + lastErr + '</td>' +
+        '<td><button class="ghost btn-sm" onclick="triggerAgentTask(' + JSON.stringify(t.name) + ')">Trigger</button></td>' +
+        '</tr>';
+    });
+    
+    $('agent-panel-body').innerHTML = 
+      '<table class="override-table">' +
+        '<thead><tr><th>Task Name</th><th>Status</th><th>Interval</th><th>Last Run</th><th>Next Run</th><th>Runs / Errors</th><th>Last Error</th><th>Action</th></tr></thead>' +
+        '<tbody>' + rows.join('') + '</tbody>' +
+      '</table>';
+  } catch (err) {
+    $('agent-panel-body').innerHTML = '<div class="empty">Error loading Agent status: ' + esc(err.message) + '</div>';
+  }
+}
+
+async function triggerAgentTask(name) {
+  if (!confirm('Manually trigger agent task "' + name + '"?')) return;
+  try {
+    const r = await fetch('/v1/agent/trigger', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ task: name }),
+    });
+    if (!r.ok) { const err = await r.json(); throw new Error(err.error || 'Unknown error'); }
+    showToast('Task "' + name + '" triggered successfully', 'ok');
+    await loadAgentStatus();
+  } catch(err) {
+    showToast('Error: ' + err.message, 'err');
+  }
+}
+
+// ── Clients & Policies tab ───────────────────────────────────────────────────
+async function loadClientsTab() {
+  await Promise.all([loadGroups(), loadMappings()]);
+  await loadGroupOverrides();
+}
+
+async function loadGroups() {
+  try {
+    const r = await fetch('/v1/groups');
+    const payload = await r.json();
+    const groups = payload.items || [];
+    state.clients.groups = groups;
+
+    // Populate select elements
+    const mapGroupSelect = $('map-group-input');
+    const ovGroupSelect = $('override-group-select');
+    const prevSelectedGroup = ovGroupSelect.value;
+
+    mapGroupSelect.innerHTML = groups.map(g => `<option value="${g.id}">${esc(g.name)}</option>`).join('');
+    ovGroupSelect.innerHTML = groups.map(g => `<option value="${g.id}">${esc(g.name)}</option>`).join('');
+
+    if (prevSelectedGroup && groups.some(g => String(g.id) === prevSelectedGroup)) {
+      ovGroupSelect.value = prevSelectedGroup;
+    } else if (groups.length > 0) {
+      ovGroupSelect.value = groups[0].id;
+    }
+
+    $('groups-grid').innerHTML = groups.length
+      ? groups.map(renderGroupCard).join('')
+      : '<div class="empty">No policy groups configured.</div>';
+  } catch (err) {
+    $('groups-grid').innerHTML = '<div class="empty">Error loading groups: ' + esc(err.message) + '</div>';
+  }
+}
+
+function renderGroupCard(g) {
+  const blockCategories = g.block_categories || [];
+  const badges = blockCategories.map(c => `<span class="grp-badge">${esc(c)}</span>`).join('');
+  const strictPhish = g.strict_phishing ? '<span class="active">✓ Strict Phishing</span>' : '<span>✗ Strict Phishing</span>';
+  const strictMal = g.strict_malware ? '<span class="active">✓ Strict Malware</span>' : '<span>✗ Strict Malware</span>';
+
+  const deleteBtn = (g.id === 1 || g.name.toLowerCase() === 'default')
+    ? ''
+    : `<button class="ghost btn-sm btn-danger" onclick="deleteGroup(${g.id}, '${esc(g.name)}')">Delete</button>`;
+
+  return `<div class="group-card">
+    <div class="grp-header">
+      <strong class="grp-name">${esc(g.name)}</strong>
+      <span style="font-size:11px;color:var(--muted)">ID: ${g.id}</span>
+    </div>
+    <p class="grp-desc">${esc(g.description || 'No description')}</p>
+    <div class="grp-badges">
+      ${badges || '<span class="grp-badge" style="background:rgba(255,255,255,.05);color:var(--muted)">no blocked categories</span>'}
+    </div>
+    <div class="grp-features" style="margin-top: 8px;">
+      ${strictPhish} &middot; ${strictMal}
+    </div>
+    <div class="grp-actions">
+      <button class="ghost btn-sm" onclick="openEditGroupModal(${g.id})">Edit</button>
+      ${deleteBtn}
+    </div>
+  </div>`;
+}
+
+async function loadMappings() {
+  try {
+    const r = await fetch('/v1/mappings');
+    const payload = await r.json();
+    const mappings = payload.items || [];
+    state.clients.mappings = mappings;
+    $('mappings-tbody').innerHTML = mappings.length
+      ? mappings.map(renderMappingRow).join('')
+      : '<tr><td colspan="5" class="empty">No client mappings configured.</td></tr>';
+  } catch (err) {
+    $('mappings-tbody').innerHTML = '<tr><td colspan="5" class="empty">Error: ' + esc(err.message) + '</td></tr>';
+  }
+}
+
+function renderMappingRow(item) {
+  const typeLabels = {
+    'ip': 'IP Address',
+    'cidr': 'CIDR Range',
+    'client_id': 'DoH Client ID'
+  };
+  const typeLabel = typeLabels[item.mapping_type] || item.mapping_type;
+  return '<tr>' +
+    '<td>' + esc(typeLabel) + '</td>' +
+    '<td style="font-weight:700">' + esc(item.value) + '</td>' +
+    '<td><span class="chip" style="background:rgba(29,111,138,.08);color:var(--accent);font-weight:700">' + esc(item.group_name || ('Group ID ' + item.group_id)) + '</span></td>' +
+    '<td style="color:var(--muted)">' + fmtTime(item.created_at) + '</td>' +
+    '<td><button class="ghost btn-sm btn-danger" onclick="deleteMapping(' + item.id + ')">Delete</button></td>' +
+    '</tr>';
+}
+
+async function deleteMapping(id) {
+  if (!confirm('Delete this client mapping?')) return;
+  try {
+    const r = await fetch('/v1/mappings?id=' + id, { method: 'DELETE' });
+    if (!r.ok) { const err = await r.json(); throw new Error(err.error || 'Unknown error'); }
+    showToast('Mapping deleted successfully', 'ok');
+    await loadMappings();
+  } catch (err) {
+    showToast('Error: ' + err.message, 'err');
+  }
+}
+
+async function handleMappingSubmit(e) {
+  e.preventDefault();
+  const mapping_type = $('map-type-input').value;
+  const value = $('map-value-input').value.trim();
+  const group_id = parseInt($('map-group-input').value, 10);
+
+  if (!value) {
+    showToast('Mapping value is required', 'err');
+    return;
+  }
+  if (isNaN(group_id) || group_id <= 0) {
+    showToast('Valid group selection is required', 'err');
+    return;
+  }
+
+  try {
+    const r = await fetch('/v1/mappings', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ mapping_type, value, group_id })
+    });
+    if (!r.ok) { const err = await r.json(); throw new Error(err.error || 'Unknown error'); }
+    showToast('Mapping added successfully', 'ok');
+    $('map-value-input').value = '';
+    await loadMappings();
+  } catch (err) {
+    showToast('Error: ' + err.message, 'err');
+  }
+}
+
+async function loadGroupOverrides() {
+  const group_id = parseInt($('override-group-select').value, 10);
+  if (!group_id || isNaN(group_id)) {
+    $('group-overrides-tbody').innerHTML = '<tr><td colspan="5" class="empty">Select a group to load overrides.</td></tr>';
+    return;
+  }
+  try {
+    const r = await fetch('/v1/group-overrides?group_id=' + group_id);
+    const payload = await r.json();
+    const overrides = payload.items || [];
+    state.clients.overrides = overrides;
+    $('group-overrides-tbody').innerHTML = overrides.length
+      ? overrides.map(o => renderGroupOverrideRow(o, group_id)).join('')
+      : '<tr><td colspan="5" class="empty">No overrides configured for this group.</td></tr>';
+  } catch (err) {
+    $('group-overrides-tbody').innerHTML = '<tr><td colspan="5" class="empty">Error: ' + esc(err.message) + '</td></tr>';
+  }
+}
+
+function renderGroupOverrideRow(item, group_id) {
+  const badgeClass = item.action === 'block' ? 'badge-block' : 'badge-allow';
+  return '<tr>' +
+    '<td style="font-weight:700">' + esc(item.domain) + '</td>' +
+    '<td><span class="' + badgeClass + '">' + esc(item.action) + '</span></td>' +
+    '<td style="color:var(--muted)">' + esc(item.reason || '—') + '</td>' +
+    '<td style="color:var(--muted)">' + fmtTime(item.updated_at) + '</td>' +
+    '<td><button class="ghost btn-sm btn-danger" onclick="deleteGroupOverride(' + group_id + ', ' + JSON.stringify(item.domain) + ')">Delete</button></td>' +
+    '</tr>';
+}
+
+async function deleteGroupOverride(group_id, domain) {
+  if (!confirm('Delete override for ' + domain + '?')) return;
+  try {
+    const r = await fetch('/v1/group-overrides?group_id=' + group_id + '&domain=' + encodeURIComponent(domain), { method: 'DELETE' });
+    if (!r.ok) { const err = await r.json(); throw new Error(err.error || 'Unknown error'); }
+    showToast('Group override deleted: ' + domain, 'ok');
+    await loadGroupOverrides();
+  } catch (err) {
+    showToast('Error: ' + err.message, 'err');
+  }
+}
+
+async function handleGroupOverrideSubmit(e) {
+  e.preventDefault();
+  const group_id = parseInt($('override-group-select').value, 10);
+  if (isNaN(group_id) || group_id <= 0) {
+    showToast('Please select a group first', 'err');
+    return;
+  }
+  const domain = $('go-domain-input').value.trim();
+  const action = $('go-action-input').value;
+  const reason = $('go-reason-input').value.trim();
+
+  if (!domain) {
+    showToast('Domain is required', 'err');
+    return;
+  }
+
+  try {
+    const r = await fetch('/v1/group-overrides', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ group_id, domain, action, reason })
+    });
+    if (!r.ok) { const err = await r.json(); throw new Error(err.error || 'Unknown error'); }
+    showToast('Group override saved: ' + domain + ' → ' + action, 'ok');
+    $('go-domain-input').value = '';
+    $('go-reason-input').value = '';
+    await loadGroupOverrides();
+  } catch (err) {
+    showToast('Error: ' + err.message, 'err');
+  }
+}
+
+function openNewGroupModal() {
+  $('modal-title').textContent = 'New Policy Group';
+  $('group-id-input').value = '';
+  $('group-name-input').value = '';
+  $('group-name-input').disabled = false;
+  $('group-desc-input').value = '';
+
+  // Clear checkboxes
+  document.querySelectorAll('input[name="block-cat"]').forEach(cb => cb.checked = false);
+  $('group-phish-input').checked = false;
+  $('group-malware-input').checked = false;
+
+  $('group-modal').classList.add('active');
+}
+
+function openEditGroupModal(id) {
+  const g = state.clients.groups.find(group => group.id === id);
+  if (!g) return;
+
+  $('modal-title').textContent = 'Edit Policy Group';
+  $('group-id-input').value = g.id;
+  $('group-name-input').value = g.name;
+
+  // Prevent renaming the default group to avoid breaking core assumptions
+  if (g.id === 1 || g.name.toLowerCase() === 'default') {
+    $('group-name-input').disabled = true;
+  } else {
+    $('group-name-input').disabled = false;
+  }
+
+  $('group-desc-input').value = g.description || '';
+
+  const blockCats = g.block_categories || [];
+  document.querySelectorAll('input[name="block-cat"]').forEach(cb => {
+    cb.checked = blockCats.includes(cb.value);
+  });
+
+  $('group-phish-input').checked = !!g.strict_phishing;
+  $('group-malware-input').checked = !!g.strict_malware;
+
+  $('group-modal').classList.add('active');
+}
+
+function closeGroupModal() {
+  $('group-modal').classList.remove('active');
+}
+
+async function handleGroupSubmit(e) {
+  e.preventDefault();
+  const idStr = $('group-id-input').value;
+  const name = $('group-name-input').value.trim();
+  const description = $('group-desc-input').value.trim();
+
+  const blockCategories = [];
+  document.querySelectorAll('input[name="block-cat"]:checked').forEach(cb => {
+    blockCategories.push(cb.value);
+  });
+
+  const strictPhishing = $('group-phish-input').checked;
+  const strictMalware = $('group-malware-input').checked;
+
+  if (!name) {
+    showToast('Group name is required', 'err');
+    return;
+  }
+
+  try {
+    const isEdit = idStr !== '';
+    const url = isEdit ? '/v1/groups?id=' + idStr : '/v1/groups';
+    const method = isEdit ? 'PUT' : 'POST';
+
+    const r = await fetch(url, {
+      method: method,
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        name,
+        description,
+        block_categories: blockCategories,
+        strict_phishing: strictPhishing,
+        strict_malware: strictMalware
+      })
+    });
+
+    if (!r.ok) { const err = await r.json(); throw new Error(err.error || 'Unknown error'); }
+
+    showToast(isEdit ? 'Group updated successfully' : 'Group created successfully', 'ok');
+    closeGroupModal();
+    await loadGroups();
+  } catch (err) {
+    showToast('Error: ' + err.message, 'err');
+  }
+}
+
+async function deleteGroup(id, name) {
+  if (id === 1 || name.toLowerCase() === 'default') {
+    showToast('Cannot delete default group', 'err');
+    return;
+  }
+  if (!confirm('Delete group "' + name + '"? This will remove all associated client mappings and overrides.')) return;
+
+  try {
+    const r = await fetch('/v1/groups?id=' + id, { method: 'DELETE' });
+    if (!r.ok) { const err = await r.json(); throw new Error(err.error || 'Unknown error'); }
+    showToast('Group "' + name + '" deleted successfully', 'ok');
+    await loadClientsTab();
+  } catch (err) {
+    showToast('Error: ' + err.message, 'err');
+  }
+}
+
+async function handleLogout() {
+  if (!confirm('Bạn có chắc chắn muốn đăng xuất khỏi Admin Gateway không?')) return;
+  try {
+    const res = await fetch('/v1/auth/logout', { method: 'POST' });
+    if (res.ok) {
+      window.location.reload();
+    } else {
+      showToast('Đăng xuất thất bại', 'err');
+    }
+  } catch (err) {
+    showToast('Lỗi: ' + err.message, 'err');
+  }
+}
+
+// ── Polling & init ────────────────────────────────────────────────────────────
+async function refreshShell() {
+  await checkHealth();
+  if (state.activeTab === 'analysis') await loadRecent();
+  else await loadTabData(state.activeTab);
+}
+
+refreshShell();
+setInterval(refreshShell, 15000);
+
+// ── Helpers ───────────────────────────────────────────────────────────────────
+function esc(v) {
+  return String(v || '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#039;'}[c]));
+}
+function fmtTime(v) {
+  if (!v) return '—';
+  return new Date(v).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+}
+function fmtUptime(secs) {
+  const d = Math.floor(secs / 86400);
+  const h = Math.floor((secs % 86400) / 3600);
+  const m = Math.floor((secs % 3600) / 60);
+  return (d ? d + 'd ' : '') + (h ? h + 'h ' : '') + m + 'm';
+}
+function pct(n, total) { return total ? Math.round(n / total * 100) + '%' : '0%'; }
+let toastTimer;
+function showToast(msg, type) {
+  toast.textContent = msg;
+  toast.className = 'toast ' + type + ' show';
+  clearTimeout(toastTimer);
+  toastTimer = setTimeout(() => { toast.classList.remove('show'); }, 3000);
+}
+</script>
+</body>
+</html>

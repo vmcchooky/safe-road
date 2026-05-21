@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log"
 	"net/http"
 	"net/url"
 	"strings"
@@ -20,7 +21,27 @@ const (
 	defaultBaseURL = "https://generativelanguage.googleapis.com/v1beta"
 )
 
+// Config holds all parameters to initialize the unified AI interface.
+type Config struct {
+	Provider      string // "none", "gemini", "ollama", "hybrid"
+	GeminiBaseURL string
+	GeminiAPIKey  string
+	GeminiModel   string
+	GeminiTimeout time.Duration
+	OllamaBaseURL string
+	OllamaModel   string
+	OllamaTimeout time.Duration
+}
+
+// Client acts as the unified AI refinement manager. It implements the Provider interface.
 type Client struct {
+	providerType string
+	gemini       *GeminiClient
+	ollama       *OllamaClient
+}
+
+// GeminiClient implements Provider for Google Gemini API.
+type GeminiClient struct {
 	baseURL string
 	apiKey  string
 	model   string
@@ -32,6 +53,7 @@ type Result struct {
 	Verdict    string  `json:"verdict"`
 	Confidence float64 `json:"confidence"`
 	Reason     string  `json:"reason"`
+	Category   string  `json:"category"`
 }
 
 type generateRequest struct {
@@ -64,7 +86,92 @@ type generateResponse struct {
 	} `json:"error,omitempty"`
 }
 
+// NewClient initializes the AI Client manager with the selected provider type.
+func NewClient(cfg Config) *Client {
+	prov := strings.ToLower(strings.TrimSpace(cfg.Provider))
+	if prov == "" {
+		if cfg.GeminiAPIKey != "" {
+			prov = "gemini"
+		} else {
+			prov = "none"
+		}
+	}
+
+	c := &Client{
+		providerType: prov,
+	}
+
+	if prov == "gemini" || prov == "hybrid" {
+		c.gemini = NewGeminiClient(cfg.GeminiBaseURL, cfg.GeminiAPIKey, cfg.GeminiModel, cfg.GeminiTimeout)
+	}
+	if prov == "ollama" || prov == "hybrid" {
+		c.ollama = NewOllamaClient(cfg.OllamaBaseURL, cfg.OllamaModel, cfg.OllamaTimeout)
+	}
+
+	return c
+}
+
+// New is a legacy constructor kept to maintain 100% backwards-compatibility with existing tests.
 func New(baseURL, apiKey, model string, timeout time.Duration) *Client {
+	prov := "gemini"
+	if apiKey == "" {
+		prov = "none"
+	}
+	return &Client{
+		providerType: prov,
+		gemini:       NewGeminiClient(baseURL, apiKey, model, timeout),
+	}
+}
+
+// Enabled returns true if the configured AI provider is enabled and active.
+func (c *Client) Enabled() bool {
+	if c == nil {
+		return false
+	}
+	switch c.providerType {
+	case "gemini":
+		return c.gemini.Enabled()
+	case "ollama":
+		return c.ollama.Enabled()
+	case "hybrid":
+		return (c.ollama != nil && c.ollama.Enabled()) || (c.gemini != nil && c.gemini.Enabled())
+	default:
+		return false
+	}
+}
+
+// Refine routes refinement requests to the chosen provider, supporting automatic fallback in hybrid mode.
+func (c *Client) Refine(ctx context.Context, domain string, current analysis.Result) (analysis.Result, error) {
+	if !c.Enabled() {
+		return analysis.Result{}, errors.New("ai client disabled")
+	}
+
+	switch c.providerType {
+	case "gemini":
+		return c.gemini.Refine(ctx, domain, current)
+	case "ollama":
+		return c.ollama.Refine(ctx, domain, current)
+	case "hybrid":
+		// Try local Ollama first
+		if c.ollama != nil && c.ollama.Enabled() {
+			res, err := c.ollama.Refine(ctx, domain, current)
+			if err == nil {
+				return res, nil
+			}
+			log.Printf("local Ollama refinement failed: %v, falling back to Gemini API", err)
+		}
+		// Fallback to Gemini
+		if c.gemini != nil && c.gemini.Enabled() {
+			return c.gemini.Refine(ctx, domain, current)
+		}
+		return analysis.Result{}, errors.New("no enabled AI providers in hybrid mode")
+	default:
+		return analysis.Result{}, errors.New("unknown AI provider type")
+	}
+}
+
+// NewGeminiClient creates a new client for Google's Gemini API.
+func NewGeminiClient(baseURL, apiKey, model string, timeout time.Duration) *GeminiClient {
 	baseURL = strings.TrimSpace(baseURL)
 	apiKey = strings.TrimSpace(apiKey)
 	if model == "" {
@@ -79,10 +186,10 @@ func New(baseURL, apiKey, model string, timeout time.Duration) *Client {
 	}
 
 	if apiKey == "" {
-		return &Client{model: model, timeout: timeout}
+		return &GeminiClient{model: model, timeout: timeout}
 	}
 
-	return &Client{
+	return &GeminiClient{
 		baseURL: strings.TrimRight(baseURL, "/"),
 		apiKey:  apiKey,
 		model:   model,
@@ -96,13 +203,15 @@ func New(baseURL, apiKey, model string, timeout time.Duration) *Client {
 	}
 }
 
-func (c *Client) Enabled() bool {
-	return c != nil && c.apiKey != "" && c.http != nil
+// Enabled implements Provider for Gemini.
+func (g *GeminiClient) Enabled() bool {
+	return g != nil && g.apiKey != "" && g.http != nil
 }
 
-func (c *Client) Refine(ctx context.Context, domain string, current analysis.Result) (analysis.Result, error) {
-	if !c.Enabled() {
-		return analysis.Result{}, errors.New("ai client disabled")
+// Refine implements Provider for Gemini.
+func (g *GeminiClient) Refine(ctx context.Context, domain string, current analysis.Result) (analysis.Result, error) {
+	if !g.Enabled() {
+		return analysis.Result{}, errors.New("gemini provider disabled")
 	}
 
 	prompt := buildPrompt(domain, current)
@@ -120,17 +229,17 @@ func (c *Client) Refine(ctx context.Context, domain string, current analysis.Res
 		return analysis.Result{}, err
 	}
 
-	ctx, cancel := context.WithTimeout(ctx, c.timeout)
+	ctx, cancel := context.WithTimeout(ctx, g.timeout)
 	defer cancel()
 
-	requestURL := fmt.Sprintf("%s/models/%s:generateContent?key=%s", c.baseURL, url.PathEscape(c.model), url.QueryEscape(c.apiKey))
+	requestURL := fmt.Sprintf("%s/models/%s:generateContent?key=%s", g.baseURL, url.PathEscape(g.model), url.QueryEscape(g.apiKey))
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, requestURL, bytes.NewReader(reqBody))
 	if err != nil {
 		return analysis.Result{}, err
 	}
 	req.Header.Set("Content-Type", "application/json")
 
-	resp, err := c.http.Do(req)
+	resp, err := g.http.Do(req)
 	if err != nil {
 		return analysis.Result{}, err
 	}
@@ -182,6 +291,14 @@ func (c *Client) Refine(ctx context.Context, domain string, current analysis.Res
 		result.Reasons = []string{"local ai classification: " + parsed.Reason}
 	}
 
+	// Set category from parsed response or fallback to local heuristics
+	parsedCategory := strings.ToLower(strings.TrimSpace(parsed.Category))
+	if parsedCategory != "" && parsedCategory != "uncategorized" {
+		result.Category = parsedCategory
+	} else {
+		result.Category = analysis.ClassifyCategory(domain)
+	}
+
 	return result, nil
 }
 
@@ -226,6 +343,6 @@ func buildPrompt(domain string, current analysis.Result) string {
 Kết quả hiện tại: verdict=%s, score=%d, confidence=%.2f
 
 Trả lời CHÍNH XÁC theo JSON:
-{"verdict": "SAFE|SUSPICIOUS|MALICIOUS", "confidence": 0.0-1.0, "reason": "giải thích ngắn"}`,
+{"verdict": "SAFE|SUSPICIOUS|MALICIOUS", "confidence": 0.0-1.0, "category": "social_media|adult|gambling|gaming|advertising|malware|phishing|uncategorized", "reason": "giải thích ngắn"}`,
 		domain, current.Verdict, current.Score, current.Confidence)
 }

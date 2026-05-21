@@ -1,16 +1,11 @@
 package main
 
 import (
-	"compress/gzip"
 	"context"
 	"encoding/json"
-	"errors"
 	"flag"
 	"fmt"
-	"io"
 	"log"
-	"net/http"
-	"os"
 	"strings"
 	"time"
 
@@ -65,52 +60,4 @@ func main() {
 		log.Fatal(err)
 	}
 	fmt.Println(string(encoded))
-}
-
-func openSource(ctx context.Context, source string) (io.Reader, func(), error) {
-	if strings.HasPrefix(source, "http://") || strings.HasPrefix(source, "https://") {
-		req, err := http.NewRequestWithContext(ctx, http.MethodGet, source, nil)
-		if err != nil {
-			return nil, func() {}, err
-		}
-
-		resp, err := http.DefaultClient.Do(req)
-		if err != nil {
-			return nil, func() {}, err
-		}
-		if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-			resp.Body.Close()
-			return nil, func() {}, fmt.Errorf("feed source returned HTTP %d", resp.StatusCode)
-		}
-
-		return wrapMaybeCompressedReadCloser(resp.Body, source, resp.Header.Get("Content-Encoding"))
-	}
-
-	file, err := os.Open(source)
-	if err != nil {
-		if errors.Is(err, os.ErrNotExist) {
-			return nil, func() {}, fmt.Errorf("feed source file does not exist: %s", source)
-		}
-		return nil, func() {}, err
-	}
-
-	return wrapMaybeCompressedReadCloser(file, source, "")
-}
-
-func wrapMaybeCompressedReadCloser(body io.ReadCloser, source string, contentEncoding string) (io.Reader, func(), error) {
-	isCompressed := strings.EqualFold(strings.TrimSpace(contentEncoding), "gzip") || strings.HasSuffix(strings.ToLower(source), ".gz")
-	if !isCompressed {
-		return body, func() { _ = body.Close() }, nil
-	}
-
-	gzipReader, err := gzip.NewReader(body)
-	if err != nil {
-		_ = body.Close()
-		return nil, func() {}, err
-	}
-
-	return gzipReader, func() {
-		_ = gzipReader.Close()
-		_ = body.Close()
-	}, nil
 }

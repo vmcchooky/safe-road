@@ -115,6 +115,10 @@ pwsh ./scripts/safe-road.ps1 prune
 - `restore` reloads Redis from the newest snapshot or a path you pass in.
 - `prune` keeps the newest backups and removes stale `tmp/*.log` files.
 
+The same actions are also available as VS Code tasks in [.vscode/tasks.json](.vscode/tasks.json).
+
+For a Linux VPS, [ops/cron/safe-road.cron.example](ops/cron/safe-road.cron.example) provides a ready-made cron template for daily backup and prune jobs.
+
 ## Deployment Baseline
 
 - Default production target: single budget VPS

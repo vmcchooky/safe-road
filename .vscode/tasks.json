@@ -1,0 +1,48 @@
+{
+  "version": "2.0.0",
+  "tasks": [
+    {
+      "label": "Safe Road: Deploy",
+      "type": "shell",
+      "command": "pwsh",
+      "args": ["-NoProfile", "-File", "${workspaceFolder}/scripts/safe-road.ps1", "deploy"],
+      "group": "build",
+      "problemMatcher": []
+    },
+    {
+      "label": "Safe Road: Deploy with Feed Sync",
+      "type": "shell",
+      "command": "pwsh",
+      "args": ["-NoProfile", "-File", "${workspaceFolder}/scripts/safe-road.ps1", "deploy", "-FeedSync"],
+      "problemMatcher": []
+    },
+    {
+      "label": "Safe Road: Status",
+      "type": "shell",
+      "command": "pwsh",
+      "args": ["-NoProfile", "-File", "${workspaceFolder}/scripts/safe-road.ps1", "status"],
+      "problemMatcher": []
+    },
+    {
+      "label": "Safe Road: Backup Redis",
+      "type": "shell",
+      "command": "pwsh",
+      "args": ["-NoProfile", "-File", "${workspaceFolder}/scripts/safe-road.ps1", "backup"],
+      "problemMatcher": []
+    },
+    {
+      "label": "Safe Road: Restore Redis",
+      "type": "shell",
+      "command": "pwsh",
+      "args": ["-NoProfile", "-File", "${workspaceFolder}/scripts/safe-road.ps1", "restore"],
+      "problemMatcher": []
+    },
+    {
+      "label": "Safe Road: Prune Maintenance",
+      "type": "shell",
+      "command": "pwsh",
+      "args": ["-NoProfile", "-File", "${workspaceFolder}/scripts/safe-road.ps1", "prune", "-Keep", "7", "-LogRetentionDays", "7"],
+      "problemMatcher": []
+    }
+  ]
+}
