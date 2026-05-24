@@ -3,13 +3,14 @@ package agent
 import (
 	"context"
 	"fmt"
-	"log"
 	"sync"
 	"time"
 
 	"safe-road/internal/ai"
 	"safe-road/internal/analysis"
 	"safe-road/internal/cache"
+	"safe-road/internal/correlation"
+	"safe-road/internal/logjson"
 	"safe-road/internal/store"
 	"safe-road/internal/tlsinspect"
 	"safe-road/internal/whois"
@@ -98,7 +99,12 @@ func (t *AuditTask) Run(ctx context.Context) error {
 
 		action, err := t.auditDomain(ctx, dc.Domain)
 		if err != nil {
-			log.Printf("agent audit error for %s: %v", dc.Domain, err)
+			logjson.Error("agent audit domain error", correlation.Fields(ctx, map[string]any{
+				"service": "core-api",
+				"task":    "audit",
+				"domain":  dc.Domain,
+				"error":   err.Error(),
+			}))
 			result.Errors++
 			continue
 		}
@@ -116,8 +122,14 @@ func (t *AuditTask) Run(ctx context.Context) error {
 		result.Audited, result.AutoBlocked, result.Skipped, result.Errors)
 	_ = t.store.RecordAgentEvent("audit", "audit_completed", "", details)
 
-	log.Printf("agent audit completed: %d audited, %d auto-blocked, %d skipped, %d errors",
-		result.Audited, result.AutoBlocked, result.Skipped, result.Errors)
+	logjson.Info("agent audit completed", correlation.Fields(ctx, map[string]any{
+		"service":      "core-api",
+		"task":         "audit",
+		"audited":      result.Audited,
+		"auto_blocked": result.AutoBlocked,
+		"skipped":      result.Skipped,
+		"errors":       result.Errors,
+	}))
 
 	return nil
 }

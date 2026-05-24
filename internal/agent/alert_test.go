@@ -3,8 +3,10 @@ package agent
 import (
 	"context"
 	"encoding/json"
+	"net"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -300,6 +302,42 @@ func TestAlertTaskAdvancedChannels(t *testing.T) {
 		if !contains(text, "vietcombbank.com.vn") || !contains(text, "Ngân hàng Việt Nam") {
 			t.Errorf("Telegram payload doesn't contain spoof details: %q", text)
 		}
+	}
+}
+
+func TestSendSMTPRejectsPlaintextSubmission(t *testing.T) {
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer listener.Close()
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		conn, err := listener.Accept()
+		if err != nil {
+			return
+		}
+		defer conn.Close()
+		_, _ = conn.Write([]byte("220 test smtp\r\n250 AUTH PLAIN\r\n"))
+	}()
+
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	err = sendSMTP(ctx, listener.Addr().String(), "127.0.0.1", 587, nil, "from@example.test", []string{"to@example.test"}, []byte("test"))
+	if err == nil || !strings.Contains(err.Error(), "STARTTLS") {
+		t.Fatalf("expected STARTTLS rejection, got %v", err)
+	}
+	<-done
+}
+
+func TestNewAlertTaskDefaultsSMTPUsernameToFrom(t *testing.T) {
+	task := NewAlertTask(nil, AlertConfig{
+		EmailFrom: "sender@example.test",
+	})
+	if task.config.EmailSMTPUsername != "sender@example.test" {
+		t.Fatalf("expected SMTP username fallback, got %q", task.config.EmailSMTPUsername)
 	}
 }
 

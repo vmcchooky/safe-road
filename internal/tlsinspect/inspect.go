@@ -5,40 +5,64 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"net"
+	"net/netip"
 	"strings"
 	"time"
 )
+
+var lookupIPAddr = net.DefaultResolver.LookupIPAddr
 
 // Result contains the outcome of inspecting a domain's TLS certificate.
 // All fields are safe to use even when HasTLS is false (fail-open).
 type Result struct {
 	HasTLS      bool      `json:"has_tls"`
-	Valid        bool      `json:"valid"`
-	SelfSigned   bool      `json:"self_signed"`
-	Expired      bool      `json:"expired"`
-	Issuer       string    `json:"issuer"`
-	Subject      string    `json:"subject"`
-	SANMatch     bool      `json:"san_match"`
-	CertAgeDays  int       `json:"cert_age_days"`
-	IsWildcard   bool      `json:"is_wildcard"`
-	NotBefore    time.Time `json:"not_before"`
-	NotAfter     time.Time `json:"not_after"`
-	Score        int       `json:"score"`
-	Reasons      []string  `json:"reasons"`
+	Valid       bool      `json:"valid"`
+	SelfSigned  bool      `json:"self_signed"`
+	Expired     bool      `json:"expired"`
+	Issuer      string    `json:"issuer"`
+	Subject     string    `json:"subject"`
+	SANMatch    bool      `json:"san_match"`
+	CertAgeDays int       `json:"cert_age_days"`
+	IsWildcard  bool      `json:"is_wildcard"`
+	NotBefore   time.Time `json:"not_before"`
+	NotAfter    time.Time `json:"not_after"`
+	Score       int       `json:"score"`
+	Reasons     []string  `json:"reasons"`
 }
 
 // Inspect performs a TLS handshake to domain:443, extracts the leaf certificate
 // and returns a scored Result. Returns a zero-score Result on any error (fail-open).
 func Inspect(ctx context.Context, domain string) Result {
+	domain = strings.TrimSpace(strings.TrimSuffix(domain, "."))
+	ips, err := lookupIPAddr(ctx, domain)
+	if err != nil || len(ips) == 0 {
+		return Result{HasTLS: false, Reasons: []string{}}
+	}
+	targetIP := ""
+	for _, ip := range ips {
+		if isBlockedDialIP(ip.IP) {
+			return Result{HasTLS: false, Reasons: []string{"tls: blocked connection to private ip"}}
+		}
+		if targetIP == "" {
+			targetIP = ip.IP.String()
+		}
+	}
+	if targetIP == "" {
+		return Result{HasTLS: false, Reasons: []string{}}
+	}
+
 	dialer := &tls.Dialer{
 		Config: &tls.Config{
 			InsecureSkipVerify: true, // #nosec G402 -- intentional: we inspect the cert ourselves
 			ServerName:         domain,
 		},
-		NetDialer: &net.Dialer{},
+		NetDialer: &net.Dialer{
+			Timeout:   3 * time.Second,
+			KeepAlive: 30 * time.Second,
+		},
 	}
 
-	conn, err := dialer.DialContext(ctx, "tcp", net.JoinHostPort(domain, "443"))
+	conn, err := dialer.DialContext(ctx, "tcp", net.JoinHostPort(targetIP, "443"))
 	if err != nil {
 		// No TLS or unreachable — minor signal only (don't penalise)
 		return Result{HasTLS: false, Reasons: []string{}}
@@ -57,6 +81,27 @@ func Inspect(ctx context.Context, domain string) Result {
 
 	cert := state.PeerCertificates[0]
 	return scoreResult(domain, cert)
+}
+
+func isBlockedDialIP(ip net.IP) bool {
+	if ip == nil {
+		return true
+	}
+	if ip.IsLoopback() || ip.IsPrivate() || ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast() || ip.IsMulticast() || ip.IsUnspecified() {
+		return true
+	}
+	addr, ok := netip.AddrFromSlice(ip)
+	if !ok {
+		return true
+	}
+	if addr.Is4In6() {
+		addr = addr.Unmap()
+	}
+	if addr.IsPrivate() || addr.IsLoopback() || addr.IsLinkLocalUnicast() || addr.IsMulticast() || addr.IsUnspecified() {
+		return true
+	}
+	cgnat := netip.MustParsePrefix("100.64.0.0/10")
+	return cgnat.Contains(addr)
 }
 
 // scoreResult builds a Result from a parsed x509 leaf certificate.

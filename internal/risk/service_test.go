@@ -16,17 +16,18 @@ import (
 	"safe-road/internal/analysis"
 	"safe-road/internal/cache"
 	"safe-road/internal/config"
+	"safe-road/internal/feed"
 	"safe-road/internal/store"
 )
 
 func TestAnalyzeWithoutRedis(t *testing.T) {
 	service := NewService(Options{
 		AnalysisConfig: config.DefaultAnalysisConfig(),
-		RedisTimeout:  10 * time.Millisecond,
-		TTLAllowed:    time.Hour,
-		TTLSuspicious: time.Hour,
-		TTLBlocked:    time.Hour,
-		RecentLimit:   10,
+		RedisTimeout:   10 * time.Millisecond,
+		TTLAllowed:     time.Hour,
+		TTLSuspicious:  time.Hour,
+		TTLBlocked:     time.Hour,
+		RecentLimit:    10,
 	})
 
 	result := service.Analyze(context.Background(), "secure-login-wallet-example.com", ClientInfo{})
@@ -44,11 +45,11 @@ func TestAnalyzeWithoutRedis(t *testing.T) {
 func TestPolicyBlocksOnlyMalicious(t *testing.T) {
 	service := NewService(Options{
 		AnalysisConfig: config.DefaultAnalysisConfig(),
-		RedisTimeout:  10 * time.Millisecond,
-		TTLAllowed:    time.Hour,
-		TTLSuspicious: time.Hour,
-		TTLBlocked:    time.Hour,
-		RecentLimit:   10,
+		RedisTimeout:   10 * time.Millisecond,
+		TTLAllowed:     time.Hour,
+		TTLSuspicious:  time.Hour,
+		TTLBlocked:     time.Hour,
+		RecentLimit:    10,
 	})
 
 	blocked := service.Policy(context.Background(), "secure-login-wallet-example.com", ClientInfo{})
@@ -64,7 +65,7 @@ func TestPolicyBlocksOnlyMalicious(t *testing.T) {
 
 func TestCacheStatusDisabled(t *testing.T) {
 	service := NewService(Options{
-		AnalysisConfig: config.DefaultAnalysisConfig(),RedisTimeout: 10 * time.Millisecond})
+		AnalysisConfig: config.DefaultAnalysisConfig(), RedisTimeout: 10 * time.Millisecond})
 
 	status := service.CacheStatus(context.Background())
 	if status.Configured {
@@ -115,6 +116,47 @@ func TestThreatFeedSuffixMatch(t *testing.T) {
 	}
 }
 
+func TestFeedRevisionInvalidatesCachedAnalysis(t *testing.T) {
+	service, closeService := newTestServiceWithRedis(t)
+	defer closeService()
+
+	first := service.Analyze(context.Background(), "fresh-safe-example.test", ClientInfo{})
+	if first.CacheHit {
+		t.Fatal("expected first analysis to be uncached")
+	}
+	if first.Verdict != analysis.VerdictSafe {
+		t.Fatalf("expected initial lexical safe verdict, got %s", first.Verdict)
+	}
+
+	second := service.Analyze(context.Background(), "fresh-safe-example.test", ClientInfo{})
+	if !second.CacheHit {
+		t.Fatal("expected second analysis to hit cache before feed revision changes")
+	}
+
+	if _, err := service.redis.SetAdd(context.Background(), defaultThreatFeedKey, "fresh-safe-example.test"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := service.redis.Increment(context.Background(), feed.RevisionKey(defaultThreatFeedKey)); err != nil {
+		t.Fatal(err)
+	}
+
+	third := service.Analyze(context.Background(), "fresh-safe-example.test", ClientInfo{})
+	if third.CacheHit {
+		t.Fatal("expected cached safe result to be invalidated after feed revision bump")
+	}
+	if third.Verdict != analysis.VerdictMalicious {
+		t.Fatalf("expected feed match after revision bump, got %s", third.Verdict)
+	}
+
+	fourth := service.Analyze(context.Background(), "fresh-safe-example.test", ClientInfo{})
+	if !fourth.CacheHit {
+		t.Fatal("expected updated feed result to be cached after re-analysis")
+	}
+	if fourth.Verdict != analysis.VerdictMalicious {
+		t.Fatalf("expected cached malicious verdict, got %s", fourth.Verdict)
+	}
+}
+
 func TestThreatFeedInvalidDomain(t *testing.T) {
 	service, closeService := newTestServiceWithRedis(t)
 	defer closeService()
@@ -128,11 +170,11 @@ func TestThreatFeedInvalidDomain(t *testing.T) {
 func TestThreatFeedRedisDisabledFailOpen(t *testing.T) {
 	service := NewService(Options{
 		AnalysisConfig: config.DefaultAnalysisConfig(),
-		RedisTimeout:  10 * time.Millisecond,
-		TTLAllowed:    time.Hour,
-		TTLSuspicious: time.Hour,
-		TTLBlocked:    time.Hour,
-		RecentLimit:   10,
+		RedisTimeout:   10 * time.Millisecond,
+		TTLAllowed:     time.Hour,
+		TTLSuspicious:  time.Hour,
+		TTLBlocked:     time.Hour,
+		RecentLimit:    10,
 	})
 
 	result := service.Analyze(context.Background(), "example.com", ClientInfo{})
@@ -161,15 +203,15 @@ func TestLocalAIRefinesSuspiciousDomain(t *testing.T) {
 
 	service := NewService(Options{
 		AnalysisConfig: config.DefaultAnalysisConfig(),
-		RedisTimeout:  10 * time.Millisecond,
-		TTLAllowed:    time.Hour,
-		TTLSuspicious: time.Hour,
-		TTLBlocked:    time.Hour,
-		RecentLimit:   10,
-		GeminiBaseURL: server.URL + "/v1beta",
-		GeminiAPIKey:  "test-key",
-		GeminiModel:   "gemini-2.5-flash-lite",
-		GeminiTimeout: time.Second,
+		RedisTimeout:   10 * time.Millisecond,
+		TTLAllowed:     time.Hour,
+		TTLSuspicious:  time.Hour,
+		TTLBlocked:     time.Hour,
+		RecentLimit:    10,
+		GeminiBaseURL:  server.URL + "/v1beta",
+		GeminiAPIKey:   "test-key",
+		GeminiModel:    "gemini-2.5-flash-lite",
+		GeminiTimeout:  time.Second,
 	})
 
 	result := service.Analyze(context.Background(), "secure-login-example.com", ClientInfo{})
@@ -190,15 +232,15 @@ func TestLocalAIFailureFailsOpen(t *testing.T) {
 
 	service := NewService(Options{
 		AnalysisConfig: config.DefaultAnalysisConfig(),
-		RedisTimeout:  10 * time.Millisecond,
-		TTLAllowed:    time.Hour,
-		TTLSuspicious: time.Hour,
-		TTLBlocked:    time.Hour,
-		RecentLimit:   10,
-		GeminiBaseURL: server.URL + "/v1beta",
-		GeminiAPIKey:  "test-key",
-		GeminiModel:   "gemini-2.5-flash-lite",
-		GeminiTimeout: time.Second,
+		RedisTimeout:   10 * time.Millisecond,
+		TTLAllowed:     time.Hour,
+		TTLSuspicious:  time.Hour,
+		TTLBlocked:     time.Hour,
+		RecentLimit:    10,
+		GeminiBaseURL:  server.URL + "/v1beta",
+		GeminiAPIKey:   "test-key",
+		GeminiModel:    "gemini-2.5-flash-lite",
+		GeminiTimeout:  time.Second,
 	})
 
 	result := service.Analyze(context.Background(), "secure-login-example.com", ClientInfo{})
@@ -264,12 +306,12 @@ func newTestServiceWithRedis(t *testing.T) (*Service, func()) {
 
 	service := NewService(Options{
 		AnalysisConfig: config.DefaultAnalysisConfig(),
-		Redis:         cache.NewRedis(server.Addr(), "", 0),
-		RedisTimeout:  100 * time.Millisecond,
-		TTLAllowed:    time.Hour,
-		TTLSuspicious: time.Hour,
-		TTLBlocked:    time.Hour,
-		RecentLimit:   10,
+		Redis:          cache.NewRedis(server.Addr(), "", 0),
+		RedisTimeout:   100 * time.Millisecond,
+		TTLAllowed:     time.Hour,
+		TTLSuspicious:  time.Hour,
+		TTLBlocked:     time.Hour,
+		RecentLimit:    10,
 	})
 
 	return service, func() {
@@ -352,6 +394,7 @@ func TestOverrideBeatsWhitelist(t *testing.T) {
 	if err := os.WriteFile(whitelistPath, []byte("whitelisted.test\n"), 0644); err != nil {
 		t.Fatal(err)
 	}
+	t.Setenv("SAFE_ROAD_FEED_FILE_ROOT", filepath.Dir(whitelistPath))
 
 	dbPath := filepath.Join(t.TempDir(), "test.db")
 	storeDB, err := store.New(dbPath, 30)
@@ -495,5 +538,3 @@ func TestClientGroupPolicyDynamicEnforcement(t *testing.T) {
 		t.Fatalf("expected admin override reason, got %v", pDevsSocPostOverride.Result.Reasons)
 	}
 }
-
-

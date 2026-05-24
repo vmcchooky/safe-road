@@ -1,0 +1,304 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Access Blocked | Safe Road</title>
+  <style>
+    :root {
+      --bg: #f4efe6;
+      --ink: #1d2a32;
+      --muted: #5f6c72;
+      --panel: rgba(255,255,255,0.82);
+      --line: rgba(29,42,50,0.12);
+      --danger: #b53b2d;
+      --danger-soft: #f5d8cf;
+      --accent: #244a57;
+      --accent-soft: #dce8ec;
+      --success: #2d6a4f;
+      --success-soft: #d8ede3;
+      --shadow: 0 22px 60px rgba(29,42,50,0.12);
+    }
+
+    * { box-sizing: border-box; }
+
+    body {
+      margin: 0;
+      min-height: 100vh;
+      font-family: "Segoe UI", "Helvetica Neue", Arial, sans-serif;
+      color: var(--ink);
+      background:
+        radial-gradient(circle at top left, rgba(181,59,45,0.12), transparent 34%),
+        radial-gradient(circle at bottom right, rgba(36,74,87,0.16), transparent 28%),
+        linear-gradient(160deg, #faf7f1 0%, var(--bg) 100%);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      padding: 28px;
+    }
+
+    .shell {
+      width: min(980px, 100%);
+      background: var(--panel);
+      border: 1px solid var(--line);
+      border-radius: 28px;
+      box-shadow: var(--shadow);
+      overflow: hidden;
+      backdrop-filter: blur(18px);
+    }
+
+    .hero {
+      padding: 30px 32px 18px;
+      border-bottom: 1px solid var(--line);
+      background:
+        linear-gradient(135deg, rgba(181,59,45,0.08), transparent 48%),
+        linear-gradient(180deg, rgba(255,255,255,0.92), rgba(255,255,255,0.72));
+    }
+
+    .eyebrow {
+      display: inline-block;
+      padding: 8px 12px;
+      border-radius: 999px;
+      background: var(--danger-soft);
+      color: var(--danger);
+      font-size: 12px;
+      font-weight: 800;
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+    }
+
+    h1 {
+      margin: 16px 0 10px;
+      font-size: clamp(32px, 5vw, 54px);
+      line-height: 0.96;
+      letter-spacing: -0.04em;
+    }
+
+    .lede {
+      max-width: 720px;
+      color: var(--muted);
+      font-size: 16px;
+      line-height: 1.65;
+      margin: 0;
+    }
+
+    .grid {
+      display: grid;
+      grid-template-columns: 1.2fr 0.8fr;
+      gap: 0;
+    }
+
+    .main, .side {
+      padding: 28px 32px 32px;
+    }
+
+    .side {
+      border-left: 1px solid var(--line);
+      background: rgba(255,255,255,0.45);
+    }
+
+    .card {
+      border: 1px solid var(--line);
+      border-radius: 22px;
+      padding: 20px;
+      background: rgba(255,255,255,0.64);
+      margin-bottom: 18px;
+    }
+
+    .card h2, .card h3 {
+      margin: 0 0 10px;
+      font-size: 16px;
+      letter-spacing: -0.02em;
+    }
+
+    .fact {
+      margin: 0 0 12px;
+      padding: 12px 14px;
+      border-radius: 16px;
+      background: rgba(36,74,87,0.06);
+    }
+
+    .fact span {
+      display: block;
+      font-size: 11px;
+      text-transform: uppercase;
+      letter-spacing: 0.08em;
+      color: var(--muted);
+      margin-bottom: 4px;
+      font-weight: 700;
+    }
+
+    .fact strong {
+      display: block;
+      font-size: 18px;
+      word-break: break-word;
+    }
+
+    .note {
+      margin: 0;
+      font-size: 14px;
+      line-height: 1.65;
+      color: var(--muted);
+    }
+
+    .success {
+      border-color: rgba(45,106,79,0.24);
+      background: var(--success-soft);
+      color: var(--success);
+      font-size: 14px;
+      font-weight: 700;
+    }
+
+    form {
+      display: grid;
+      gap: 12px;
+      margin-top: 14px;
+    }
+
+    label {
+      display: grid;
+      gap: 6px;
+      font-size: 13px;
+      font-weight: 700;
+      color: var(--accent);
+    }
+
+    input, textarea, button {
+      font: inherit;
+    }
+
+    input, textarea {
+      width: 100%;
+      border: 1px solid rgba(29,42,50,0.18);
+      border-radius: 14px;
+      padding: 12px 14px;
+      background: rgba(255,255,255,0.92);
+      color: var(--ink);
+    }
+
+    textarea {
+      min-height: 112px;
+      resize: vertical;
+    }
+
+    button {
+      border: none;
+      border-radius: 14px;
+      padding: 13px 16px;
+      font-weight: 800;
+      background: linear-gradient(135deg, var(--danger), #8f261d);
+      color: #fff;
+      cursor: pointer;
+    }
+
+    .meta {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 10px;
+      margin-top: 14px;
+    }
+
+    .meta span {
+      padding: 8px 11px;
+      border-radius: 999px;
+      background: var(--accent-soft);
+      color: var(--accent);
+      font-size: 12px;
+      font-weight: 700;
+    }
+
+    .foot {
+      font-size: 12px;
+      color: var(--muted);
+      margin-top: 12px;
+      line-height: 1.55;
+    }
+
+    @media (max-width: 860px) {
+      .grid { grid-template-columns: 1fr; }
+      .side { border-left: none; border-top: 1px solid var(--line); }
+      .hero, .main, .side { padding: 22px; }
+    }
+  </style>
+</head>
+<body>
+  <main class="shell">
+    <section class="hero">
+      <div class="eyebrow">Safe Road Block Page</div>
+      <h1>This site was blocked.</h1>
+      <p class="lede">Safe Road redirected this request because the requested destination matched a local protection policy. This page is intentionally lightweight so it can load even when the original destination is sinkholed to the block-page IP.</p>
+    </section>
+
+    <section class="grid">
+      <div class="main">
+        {{if .ReportReceived}}
+        <div class="card success">
+          Your false-positive report was received. An operator can now review it with request ID <code>{{.RequestID}}</code>.
+        </div>
+        {{end}}
+
+        <div class="card">
+          <h2>What was blocked</h2>
+          <div class="fact">
+            <span>Blocked domain</span>
+            <strong>{{.Domain}}</strong>
+          </div>
+          <div class="fact">
+            <span>Requested path</span>
+            <strong>{{.RequestedPath}}</strong>
+          </div>
+          <div class="fact">
+            <span>Category</span>
+            <strong>{{.Category}}</strong>
+          </div>
+          <p class="note">{{.Reason}}</p>
+          <div class="meta">
+            <span>Request ID: {{.RequestID}}</span>
+            <span>Review path: /block/report</span>
+          </div>
+        </div>
+
+        <div class="card">
+          <h2>Think this is a false positive?</h2>
+          <p class="note">Send a short review request. The report is stored locally for an operator to investigate.</p>
+          <form action="/block/report" method="post">
+            <input type="hidden" name="domain" value="{{.Domain}}">
+            <input type="hidden" name="requested_path" value="{{.RequestedPath}}">
+
+            <label>
+              Your contact (optional)
+              <input type="text" name="contact" maxlength="200" placeholder="email, ticket number, or team name">
+            </label>
+
+            <label>
+              Why should this be reviewed?
+              <textarea name="note" maxlength="2000" placeholder="Describe why you believe this site should be allowed."></textarea>
+            </label>
+
+            <button type="submit">Submit False-Positive Report</button>
+          </form>
+        </div>
+      </div>
+
+      <aside class="side">
+        <div class="card">
+          <h3>What to do next</h3>
+          <p class="note">If you expected this domain to be safe, submit the report form and keep the request ID. If this was unexpected on an internal business system, contact your Safe Road operator or network administrator.</p>
+          {{if .SupportEmail}}
+          <p class="note">Support contact: <strong>{{.SupportEmail}}</strong></p>
+          {{end}}
+        </div>
+
+        <div class="card">
+          <h3>HTTPS note</h3>
+          <p class="note">Direct HTTPS access to a blocked third-party domain may still trigger a browser certificate warning before this page can render. That is expected: TLS validates the original domain name before Safe Road can show the block explanation.</p>
+        </div>
+
+        <div class="foot">
+          Safe Road keeps the block page generic because DNS sinkholing does not always have access to the original verdict metadata at HTTP render time.
+        </div>
+      </aside>
+    </section>
+  </main>
+</body>
+</html>

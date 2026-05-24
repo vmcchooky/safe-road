@@ -4,10 +4,13 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"log"
+	"strconv"
 	"time"
 
 	"github.com/redis/go-redis/v9"
+
+	"safe-road/internal/correlation"
+	"safe-road/internal/logjson"
 )
 
 var ErrDisabled = errors.New("redis cache disabled")
@@ -83,12 +86,69 @@ func (r *Redis) SetJSON(ctx context.Context, key string, value any, ttl time.Dur
 	return r.client.Set(ctx, key, encoded, ttl).Err()
 }
 
+func (r *Redis) GetString(ctx context.Context, key string) (string, error) {
+	if !r.Enabled() {
+		return "", ErrDisabled
+	}
+
+	value, err := r.client.Get(ctx, key).Result()
+	if errors.Is(err, redis.Nil) {
+		return "", nil
+	}
+	if err != nil {
+		return "", err
+	}
+
+	return value, nil
+}
+
+func (r *Redis) SetString(ctx context.Context, key string, value string, ttl time.Duration) error {
+	if !r.Enabled() {
+		return ErrDisabled
+	}
+
+	return r.client.Set(ctx, key, value, ttl).Err()
+}
+
+func (r *Redis) Increment(ctx context.Context, key string) (int64, error) {
+	if !r.Enabled() {
+		return 0, ErrDisabled
+	}
+
+	return r.client.Incr(ctx, key).Result()
+}
+
+func (r *Redis) GetInt64(ctx context.Context, key string) (int64, error) {
+	if !r.Enabled() {
+		return 0, ErrDisabled
+	}
+
+	value, err := r.GetString(ctx, key)
+	if err != nil || value == "" {
+		return 0, err
+	}
+
+	parsed, err := strconv.ParseInt(value, 10, 64)
+	if err != nil {
+		return 0, err
+	}
+	return parsed, nil
+}
+
 func (r *Redis) Delete(ctx context.Context, key string) error {
 	if !r.Enabled() {
 		return ErrDisabled
 	}
 
 	return r.client.Del(ctx, key).Err()
+}
+
+func (r *Redis) Rename(ctx context.Context, fromKey, toKey string) error {
+	if !r.Enabled() {
+		return ErrDisabled
+	}
+
+	return r.client.Rename(ctx, fromKey, toKey).Err()
 }
 
 func (r *Redis) SetAdd(ctx context.Context, key string, members ...string) (int64, error) {
@@ -141,7 +201,10 @@ func (r *Redis) ListJSON(ctx context.Context, key string, start, stop int64, app
 
 	for _, value := range values {
 		if err := appendItem([]byte(value)); err != nil {
-			log.Printf("skip malformed cached item from %s: %v", key, err)
+			logjson.Warn("skip malformed cached item", correlation.Fields(ctx, map[string]any{
+				"key":   key,
+				"error": err.Error(),
+			}))
 		}
 	}
 

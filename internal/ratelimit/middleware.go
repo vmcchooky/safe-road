@@ -3,11 +3,13 @@ package ratelimit
 import (
 	"encoding/json"
 	"fmt"
-	"log"
 	"math"
 	"net"
 	"net/http"
 	"strings"
+
+	"safe-road/internal/correlation"
+	"safe-road/internal/logjson"
 )
 
 // Tier maps a URL path prefix to a specific Limiter.
@@ -52,7 +54,10 @@ func (tm *TieredMiddleware) Wrap(next http.Handler) http.Handler {
 				"error":               "rate limit exceeded",
 				"retry_after_seconds": secs,
 			})
-			log.Printf("rate limited %s on %s", sanitizeLog(ip), sanitizeLog(r.URL.Path)) // #nosec G706 -- request values are escaped by sanitizeLog before logging.
+			logjson.Warn("rate limited request", correlation.Fields(r.Context(), map[string]any{
+				"client_ip": sanitizeLog(ip),
+				"path":      sanitizeLog(r.URL.Path),
+			})) // #nosec G706 -- request values are escaped by sanitizeLog before logging.
 			return
 		}
 		next.ServeHTTP(w, r)

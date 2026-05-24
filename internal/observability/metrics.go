@@ -10,6 +10,7 @@ type Registry struct {
 	startedAt time.Time
 	mu        sync.Mutex
 	requests  map[string]*RequestSummary
+	counters  map[string]int64
 }
 
 type RequestSummary struct {
@@ -24,12 +25,14 @@ type Snapshot struct {
 	StartedAt      string                    `json:"started_at"`
 	UptimeSeconds  int64                     `json:"uptime_seconds"`
 	RequestSummary map[string]RequestSummary `json:"request_summary"`
+	Counters       map[string]int64          `json:"counters,omitempty"`
 }
 
 func NewRegistry() *Registry {
 	return &Registry{
 		startedAt: time.Now().UTC(),
 		requests:  make(map[string]*RequestSummary),
+		counters:  make(map[string]int64),
 	}
 }
 
@@ -71,10 +74,25 @@ func (r *Registry) Snapshot() Snapshot {
 	for key, value := range r.requests {
 		requestSummary[key] = *value
 	}
+	counters := make(map[string]int64, len(r.counters))
+	for key, value := range r.counters {
+		counters[key] = value
+	}
 
 	return Snapshot{
 		StartedAt:      r.startedAt.Format(time.RFC3339Nano),
 		UptimeSeconds:  int64(time.Since(r.startedAt).Seconds()),
 		RequestSummary: requestSummary,
+		Counters:       counters,
 	}
+}
+
+func (r *Registry) IncCounter(name string) {
+	if r == nil || name == "" {
+		return
+	}
+
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.counters[name]++
 }

@@ -3,12 +3,13 @@ package risk
 import (
 	"bufio"
 	"fmt"
-	"log"
 	"os"
 	"strings"
 	"sync"
 
 	"safe-road/internal/analysis"
+	"safe-road/internal/config"
+	"safe-road/internal/logjson"
 	"safe-road/internal/safefile"
 	"safe-road/internal/store"
 )
@@ -59,8 +60,14 @@ func (w *Whitelist) LoadFromDB() error {
 	w.bloom = bf
 	w.mu.Unlock()
 
-	log.Printf("loaded %d domains from database into RAM Bloom Filter (size: %.2f KB, hashes: %d)",
-		len(domains), float64(bf.m)/8.0/1024.0, bf.k)
+	logjson.Info("whitelist bloom filter loaded from database", map[string]any{
+		"service":  "risk",
+		"storage":  "sqlite",
+		"strategy": "bloom",
+		"domains":  len(domains),
+		"size_kb":  float64(bf.m) / 8.0 / 1024.0,
+		"hashes":   bf.k,
+	})
 	return nil
 }
 
@@ -72,10 +79,13 @@ func (w *Whitelist) LoadFromFile(path string) error {
 		return nil
 	}
 
-	file, err := safefile.Open(path)
+	file, err := safefile.OpenWithin(config.FeedFileRoot(), path)
 	if err != nil {
 		if os.IsNotExist(err) {
-			log.Printf("whitelist file not found at %s, continuing without whitelisting", path)
+			logjson.Warn("whitelist file not found; continuing without whitelisting", map[string]any{
+				"service": "risk",
+				"path":    path,
+			})
 			return nil
 		}
 		return err
@@ -126,7 +136,13 @@ func (w *Whitelist) LoadFromFile(path string) error {
 	}
 	w.mu.Unlock()
 
-	log.Printf("loaded %d domains into whitelist map from %s (fallback mode)", len(domains), path)
+	logjson.Info("whitelist map loaded from file", map[string]any{
+		"service":  "risk",
+		"storage":  "file",
+		"strategy": "map",
+		"domains":  len(domains),
+		"path":     path,
+	})
 	return nil
 }
 

@@ -10,6 +10,7 @@ grep -i "feed" logs/feed-sync.log
 ```
 
 When the agent is enabled, feed sync events are recorded in SQLite agent events.
+`core-api` also exposes feed freshness on `/` and `/metrics` under `feed_sync`.
 
 ## Manual sync
 
@@ -21,11 +22,19 @@ scripts/safe-road.sh feed-sync
 Recommended free source preset:
 
 ```sh
-SAFE_ROAD_AGENT_FEED_SOURCES=https://urlhaus.abuse.ch/downloads/csv_recent/,https://rescure.me/rescure_domain_blacklist.txt
+SAFE_ROAD_AGENT_FEED_PRESET=production-free
 ```
+
+That preset currently expands to:
+
+- `https://urlhaus.abuse.ch/downloads/csv_recent/`
+- `https://raw.githubusercontent.com/openphish/public_feed/refs/heads/main/feed.txt`
+
+`REScure` is not in the first-class preset because `https://rescure.me/` currently serves a temporary-closure page as of 2026-05-21.
 
 ## Follow-up
 
 - Keep sources additive unless a feed is known compromised.
 - Prefer HTTPS feed URLs.
 - Review parser stats for high invalid counts, which may indicate feed format drift.
+- Treat `feed_sync.status=stale` or any source with `stale=true` as an operator action item before relying on feed-backed blocking coverage.

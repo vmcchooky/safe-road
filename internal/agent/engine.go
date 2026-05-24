@@ -2,9 +2,11 @@ package agent
 
 import (
 	"context"
-	"log"
 	"sync"
 	"time"
+
+	"safe-road/internal/correlation"
+	"safe-road/internal/logjson"
 )
 
 // Task is the interface every agent task must implement.
@@ -19,11 +21,11 @@ type Task interface {
 type TaskStatus struct {
 	Name       string `json:"name"`
 	Enabled    bool   `json:"enabled"`
-	State      string `json:"state"`       // "idle", "running", "failed"
-	Interval   string `json:"interval"`    // human-readable
-	LastRun    string `json:"last_run"`    // RFC3339 or ""
-	NextRun    string `json:"next_run"`    // RFC3339 or ""
-	LastError  string `json:"last_error"`  // empty if last run succeeded
+	State      string `json:"state"`      // "idle", "running", "failed"
+	Interval   string `json:"interval"`   // human-readable
+	LastRun    string `json:"last_run"`   // RFC3339 or ""
+	NextRun    string `json:"next_run"`   // RFC3339 or ""
+	LastError  string `json:"last_error"` // empty if last run succeeded
 	RunCount   int64  `json:"run_count"`
 	ErrorCount int64  `json:"error_count"`
 }
@@ -91,7 +93,10 @@ func (e *Engine) Start() {
 	e.started = true
 	e.mu.Unlock()
 
-	log.Printf("agent engine started with %d tasks", len(e.tasks))
+	logjson.Info("agent engine started", map[string]any{
+		"service": "core-api",
+		"tasks":   len(e.tasks),
+	})
 	e.wg.Add(1)
 	go e.loop()
 }
@@ -108,7 +113,7 @@ func (e *Engine) Stop() {
 
 	close(e.done)
 	e.wg.Wait()
-	log.Println("agent engine stopped")
+	logjson.Info("agent engine stopped", map[string]any{"service": "core-api"})
 }
 
 // Trigger requests immediate execution of the named task.
@@ -224,7 +229,8 @@ func (e *Engine) executeTask(rt *registeredTask) {
 	rt.state = "running"
 	e.mu.Unlock()
 
-	ctx, cancel := context.WithTimeout(context.Background(), rt.timeout)
+	baseCtx := correlation.WithRunID(context.Background(), correlation.NewID("agent-"+rt.task.Name()))
+	ctx, cancel := context.WithTimeout(baseCtx, rt.timeout)
 	defer cancel()
 
 	start := time.Now()
@@ -238,11 +244,20 @@ func (e *Engine) executeTask(rt *registeredTask) {
 		rt.state = "failed"
 		rt.lastErr = err.Error()
 		rt.errCount++
-		log.Printf("agent task %q failed after %v: %v", rt.task.Name(), elapsed, err)
+		logjson.Error("agent task failed", correlation.Fields(ctx, map[string]any{
+			"service":     "core-api",
+			"task":        rt.task.Name(),
+			"duration_ms": elapsed.Milliseconds(),
+			"error":       err.Error(),
+		}))
 	} else {
 		rt.state = "idle"
 		rt.lastErr = ""
-		log.Printf("agent task %q completed in %v", rt.task.Name(), elapsed)
+		logjson.Info("agent task completed", correlation.Fields(ctx, map[string]any{
+			"service":     "core-api",
+			"task":        rt.task.Name(),
+			"duration_ms": elapsed.Milliseconds(),
+		}))
 	}
 	e.mu.Unlock()
 }

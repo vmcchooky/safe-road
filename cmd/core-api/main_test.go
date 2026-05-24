@@ -5,6 +5,8 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -13,6 +15,8 @@ import (
 	"safe-road/internal/config"
 	"safe-road/internal/observability"
 	"safe-road/internal/risk"
+	"safe-road/internal/serve"
+	"safe-road/internal/store"
 )
 
 func TestStatusEndpointHTTP(t *testing.T) {
@@ -27,7 +31,7 @@ func TestStatusEndpointHTTP(t *testing.T) {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/", app.statusHandler)
 	mux.HandleFunc("/metrics", app.metricsHandler)
-	testServer := httptest.NewServer(logRequests(mux, app.metrics))
+	testServer := httptest.NewServer(serve.WithRequestID(logRequests("core-api", mux, app.metrics)))
 	defer testServer.Close()
 
 	response, err := http.Get(testServer.URL + "/")
@@ -41,6 +45,9 @@ func TestStatusEndpointHTTP(t *testing.T) {
 	}
 	if got := response.Header.Get("Content-Type"); got != "application/json" {
 		t.Fatalf("expected application/json content type, got %q", got)
+	}
+	if response.Header.Get("X-Request-ID") == "" {
+		t.Fatal("expected X-Request-ID response header")
 	}
 
 	body, err := io.ReadAll(response.Body)
@@ -67,6 +74,9 @@ func TestStatusEndpointHTTP(t *testing.T) {
 	}
 	if payload.Redis == nil || payload.Redis.Status != "disabled" {
 		t.Fatalf("expected disabled redis status, got %#v", payload.Redis)
+	}
+	if payload.FeedSync == nil || payload.FeedSync.Status != "disabled" {
+		t.Fatalf("expected disabled feed sync status, got %#v", payload.FeedSync)
 	}
 	if len(payload.Endpoints) == 0 {
 		t.Fatal("expected endpoint list")
@@ -116,7 +126,7 @@ func TestMetricsEndpointHTTP(t *testing.T) {
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("/metrics", app.metricsHandler)
-	testServer := httptest.NewServer(logRequests(mux, app.metrics))
+	testServer := httptest.NewServer(serve.WithRequestID(logRequests("core-api", mux, app.metrics)))
 	defer testServer.Close()
 
 	response, err := http.Get(testServer.URL + "/metrics")
@@ -136,12 +146,107 @@ func TestMetricsEndpointHTTP(t *testing.T) {
 	if payload["service"] != "core-api" {
 		t.Fatalf("expected core-api service, got %#v", payload["service"])
 	}
+	feedSync, ok := payload["feed_sync"].(map[string]any)
+	if !ok {
+		t.Fatalf("expected feed_sync object, got %#v", payload["feed_sync"])
+	}
+	if feedSync["status"] != "disabled" {
+		t.Fatalf("expected disabled feed_sync status, got %#v", feedSync["status"])
+	}
 	metrics, ok := payload["metrics"].(map[string]any)
 	if !ok {
 		t.Fatalf("expected metrics object, got %#v", payload["metrics"])
 	}
 	if _, ok := metrics["request_summary"].(map[string]any); !ok {
 		t.Fatalf("expected request_summary map, got %#v", metrics["request_summary"])
+	}
+}
+
+func TestBlockPageHandlerRendersBlockedContext(t *testing.T) {
+	app := &app{
+		risk:           risk.NewService(risk.Options{AnalysisConfig: config.DefaultAnalysisConfig(), RedisTimeout: 10 * time.Millisecond}),
+		metrics:        observability.NewRegistry(),
+		deploymentTier: "budget-vps",
+	}
+	defer func() {
+		if err := app.risk.Close(); err != nil {
+			t.Fatal(err)
+		}
+	}()
+
+	recorder := httptest.NewRecorder()
+	request := httptest.NewRequest(http.MethodGet, "/block?category=phishing&reason=Matched+Safe+Road+policy", nil)
+	request.Header.Set("X-Blocked-Domain", "login.example.com")
+	request.Header.Set("X-Original-Path", "/signin")
+
+	app.blockPageHandler(recorder, request)
+
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", recorder.Code)
+	}
+
+	body := recorder.Body.String()
+	for _, fragment := range []string{"login.example.com", "/signin", "Matched Safe Road policy", "Submit False-Positive Report"} {
+		if !strings.Contains(body, fragment) {
+			t.Fatalf("expected block page to contain %q, got: %s", fragment, body)
+		}
+	}
+}
+
+func TestBlockReportHandlerStoresFalsePositiveReport(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "block-report.db")
+	storeDB, err := store.New(dbPath, 30)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	app := &app{
+		risk: risk.NewService(risk.Options{
+			AnalysisConfig: config.DefaultAnalysisConfig(),
+			RedisTimeout:   10 * time.Millisecond,
+			Store:          storeDB,
+		}),
+		metrics:        observability.NewRegistry(),
+		deploymentTier: "budget-vps",
+	}
+	defer func() {
+		if err := app.risk.Close(); err != nil {
+			t.Fatal(err)
+		}
+	}()
+
+	form := url.Values{
+		"domain":         {"maybe-blocked.example"},
+		"requested_path": {"/login"},
+		"contact":        {"ops@example.com"},
+		"note":           {"Business login page. Please review."},
+	}
+
+	recorder := httptest.NewRecorder()
+	request := httptest.NewRequest(http.MethodPost, "/block/report", strings.NewReader(form.Encode()))
+	request.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+
+	app.blockReportHandler(recorder, request)
+
+	if recorder.Code != http.StatusSeeOther {
+		t.Fatalf("expected 303 redirect, got %d", recorder.Code)
+	}
+	if location := recorder.Header().Get("Location"); !strings.Contains(location, "/block?reported=1") {
+		t.Fatalf("expected redirect back to block page, got %q", location)
+	}
+
+	events, err := storeDB.QueryAgentEvents(time.Now().Add(-1*time.Hour), []string{"false_positive_report"}, 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(events) != 1 {
+		t.Fatalf("expected 1 stored report event, got %d", len(events))
+	}
+	if events[0].Domain != "maybe-blocked.example" {
+		t.Fatalf("expected stored report domain, got %q", events[0].Domain)
+	}
+	if !strings.Contains(events[0].Details, "Business login page") {
+		t.Fatalf("expected report note in details, got %q", events[0].Details)
 	}
 }
 
@@ -164,7 +269,7 @@ func TestDashboardEndpointHTTP(t *testing.T) {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/dashboard", app.dashboardHandler)
 	mux.HandleFunc("/dashboard/", app.dashboardHandler)
-	testServer := httptest.NewServer(logRequests(mux, app.metrics))
+	testServer := httptest.NewServer(serve.WithRequestID(logRequests("core-api", mux, app.metrics)))
 	defer testServer.Close()
 
 	// 1. Without cookie, it should show login HTML
@@ -245,7 +350,8 @@ func TestRestrictedAPIsAuth(t *testing.T) {
 	mux.HandleFunc("/v1/auth/login", app.authLoginHandler)
 	mux.HandleFunc("/v1/auth/logout", app.authLogoutHandler)
 	mux.HandleFunc("/v1/overrides", app.requireAuthFunc(app.overridesHandler))
-	testServer := httptest.NewServer(logRequests(mux, app.metrics))
+	mux.HandleFunc("/v1/agent/trigger", app.requireAuthFunc(agentTriggerHandler(nil)))
+	testServer := httptest.NewServer(serve.WithRequestID(logRequests("core-api", mux, app.metrics)))
 	defer testServer.Close()
 
 	client := &http.Client{}
@@ -351,6 +457,43 @@ func TestRestrictedAPIsAuth(t *testing.T) {
 		t.Fatalf("expected 200 OK with login cookie, got %d", resp7.StatusCode)
 	}
 
+	reqCookiePost, _ := http.NewRequest(http.MethodPost, testServer.URL+"/v1/agent/trigger", nil)
+	reqCookiePost.Header.Set("Content-Type", "application/json")
+	reqCookiePost.AddCookie(sessionCookie)
+	respCookiePost, err := client.Do(reqCookiePost)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer respCookiePost.Body.Close()
+	if respCookiePost.StatusCode != http.StatusForbidden {
+		t.Fatalf("expected 403 for cookie POST without Origin, got %d", respCookiePost.StatusCode)
+	}
+
+	reqOriginPost, _ := http.NewRequest(http.MethodPost, testServer.URL+"/v1/agent/trigger", nil)
+	reqOriginPost.Header.Set("Content-Type", "application/json")
+	reqOriginPost.Header.Set("Origin", testServer.URL)
+	reqOriginPost.AddCookie(sessionCookie)
+	respOriginPost, err := client.Do(reqOriginPost)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer respOriginPost.Body.Close()
+	if respOriginPost.StatusCode == http.StatusForbidden || respOriginPost.StatusCode == http.StatusUnauthorized {
+		t.Fatalf("expected same-origin cookie POST past auth/csrf, got %d", respOriginPost.StatusCode)
+	}
+
+	reqBearerPost, _ := http.NewRequest(http.MethodPost, testServer.URL+"/v1/agent/trigger", nil)
+	reqBearerPost.Header.Set("Content-Type", "application/json")
+	reqBearerPost.Header.Set("Authorization", "Bearer testkey")
+	respBearerPost, err := client.Do(reqBearerPost)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer respBearerPost.Body.Close()
+	if respBearerPost.StatusCode == http.StatusForbidden || respBearerPost.StatusCode == http.StatusUnauthorized {
+		t.Fatalf("expected bearer POST past auth/csrf, got %d", respBearerPost.StatusCode)
+	}
+
 	// 8. Test Logout API
 	req8, _ := http.NewRequest(http.MethodPost, testServer.URL+"/v1/auth/logout", nil)
 	resp8, err := client.Do(req8)
@@ -435,4 +578,3 @@ func TestSecurityAuditLimits(t *testing.T) {
 		t.Fatalf("expected 200 OK, got %d", resp3.StatusCode)
 	}
 }
-

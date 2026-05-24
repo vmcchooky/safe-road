@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"log"
 	"net/http"
 	"os"
 	"os/signal"
@@ -12,6 +11,8 @@ import (
 	"strings"
 	"syscall"
 	"time"
+
+	"safe-road/internal/logjson"
 )
 
 // MetricsObserver định nghĩa interface lỏng lẻo (duck typing) để quan sát chỉ số HTTP.
@@ -36,7 +37,7 @@ func RunHTTPServer(server *http.Server, shutdownTimeout time.Duration) error {
 
 	select {
 	case sig := <-sigCh:
-		log.Printf("shutdown requested: %s", sig)
+		logjson.Info("shutdown requested", map[string]any{"signal": sig.String()})
 		ctx, cancel := context.WithTimeout(context.Background(), shutdownTimeout)
 		defer cancel()
 		return server.Shutdown(ctx)
@@ -59,7 +60,12 @@ func Recovery(next http.Handler, obs MetricsObserver) http.Handler {
 				// 1. Ghi nhận lỗi và ngăn xếp cuộc gọi (stack trace) chi tiết để điều tra lỗi
 				stack := make([]byte, 4096)
 				length := runtime.Stack(stack, false)
-				log.Printf("[PANIC RECOVERED] %v\nStack Trace:\n%s", rec, stack[:length])
+				logjson.Error("panic recovered", map[string]any{
+					"request_id": RequestID(r.Context()),
+					"path":       r.URL.Path,
+					"panic":      fmt.Sprintf("%v", rec),
+					"stack":      string(stack[:length]),
+				})
 
 				// 2. Thiết lập trạng thái context là đã xử lý panic để tránh ghi nhận trùng lặp ở logRequests
 				ctx := context.WithValue(r.Context(), ObservedPanicKey, true)
@@ -354,4 +360,3 @@ func htmlEscape(s string) string {
 	s = strings.ReplaceAll(s, "'", "&#39;")
 	return s
 }
-

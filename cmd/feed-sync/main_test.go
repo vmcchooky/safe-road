@@ -55,7 +55,7 @@ func TestWrapMaybeCompressedReadCloserWithGzipSuffix(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	reader, closeReader, err := feed.OpenSource(context.Background(), path, nil)
+	reader, closeReader, err := feed.OpenSourceWithin(context.Background(), path, nil, filepath.Dir(path), feed.DefaultMaxFeedBytes)
 	if err != nil {
 		t.Fatal(err)
 	}

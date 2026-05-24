@@ -2,9 +2,9 @@ package config
 
 import (
 	"encoding/json"
-	"log"
 	"strings"
 
+	"safe-road/internal/logjson"
 	"safe-road/internal/safefile"
 )
 
@@ -53,15 +53,21 @@ func LoadAnalysisConfig(path string) AnalysisConfig {
 		return defaults
 	}
 
-	data, err := safefile.ReadFile(path)
+	data, err := safefile.ReadFileWithin(ConfigFileRoot(), path)
 	if err != nil {
-		log.Printf("failed to read analysis config from %s: %v, using defaults", path, err)
+		logjson.Warn("analysis config read failed, using defaults", map[string]any{
+			"path":  path,
+			"error": err.Error(),
+		})
 		return defaults
 	}
 
 	var cfg AnalysisConfig
 	if err := json.Unmarshal(data, &cfg); err != nil {
-		log.Printf("failed to parse analysis config from %s: %v, using defaults", path, err)
+		logjson.Warn("analysis config parse failed, using defaults", map[string]any{
+			"path":  path,
+			"error": err.Error(),
+		})
 		return defaults
 	}
 

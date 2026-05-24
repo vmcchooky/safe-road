@@ -20,12 +20,21 @@ curl -Iv https://$SAFE_ROAD_PUBLIC_HOST/healthz
 
 ```sh
 scripts/safe-road.sh duckdns
-docker compose --profile production-edge restart caddy
+docker compose -f docker-compose.yml -f docker-compose.production.yml --profile production-edge restart caddy
 ```
 
 DoT certificates are configured separately through:
 
-- `SAFE_ROAD_DNS_DOT_CERT_FILE`
-- `SAFE_ROAD_DNS_DOT_KEY_FILE`
+- mounted files under `${SAFE_ROAD_DNS_DOT_CERTS_DIR:-./ops/certs/dot}`
+- `/run/safe-road/dot-certs/fullchain.pem`
+- `/run/safe-road/dot-certs/privkey.pem`
 
 If they are empty, the resolver generates a temporary self-signed certificate for development.
+
+After a renewal, refresh the mounted DoT pair and restart only the resolver:
+
+```sh
+scripts/export-dot-cert.sh /path/to/fullchain.pem /path/to/privkey.pem
+docker compose -f docker-compose.yml -f docker-compose.production.yml restart dns-resolver
+scripts/public-edge-smoke.sh "$SAFE_ROAD_PUBLIC_HOST"
+```

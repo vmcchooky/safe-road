@@ -10,6 +10,8 @@ Source reviewed:
 
 The analysis is useful as a broad architecture review, but it is partly outdated against the current repository. I treated each claim as a hypothesis and verified it against code before fixing anything.
 
+For the current operator-facing checklist from repo status to production, see [../production-completion-checklist.md](../production-completion-checklist.md).
+
 ## Claim-by-claim assessment
 
 | Area | Assessment | Evidence | Action |

@@ -7,13 +7,14 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"log"
 	"net/http"
 	"net/url"
 	"strings"
 	"time"
 
 	"safe-road/internal/analysis"
+	"safe-road/internal/correlation"
+	"safe-road/internal/logjson"
 )
 
 const (
@@ -158,7 +159,11 @@ func (c *Client) Refine(ctx context.Context, domain string, current analysis.Res
 			if err == nil {
 				return res, nil
 			}
-			log.Printf("local Ollama refinement failed: %v, falling back to Gemini API", err)
+			logjson.Warn("local ollama refinement failed; falling back to gemini", correlation.Fields(ctx, map[string]any{
+				"service": "ai",
+				"domain":  domain,
+				"error":   err.Error(),
+			}))
 		}
 		// Fallback to Gemini
 		if c.gemini != nil && c.gemini.Enabled() {

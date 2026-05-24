@@ -14,7 +14,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"log"
 	"math/big"
 	"net"
 	"net/http"
@@ -27,6 +26,8 @@ import (
 	"github.com/miekg/dns"
 
 	"safe-road/internal/config"
+	"safe-road/internal/correlation"
+	"safe-road/internal/logjson"
 	"safe-road/internal/observability"
 	"safe-road/internal/ratelimit"
 	"safe-road/internal/risk"
@@ -56,7 +57,11 @@ func main() {
 
 	ttlVal := config.Int("SAFE_ROAD_DNS_BLOCK_TTL_SECONDS", 60)
 	if ttlVal < 0 || ttlVal > 86400 {
-		log.Fatalf("SAFE_ROAD_DNS_BLOCK_TTL_SECONDS out of valid range: %d", ttlVal)
+		logjson.Error("SAFE_ROAD_DNS_BLOCK_TTL_SECONDS out of valid range", map[string]any{
+			"service": "dns-resolver",
+			"value":   ttlVal,
+		})
+		os.Exit(1)
 	}
 
 	resolver := &app{
@@ -70,7 +75,10 @@ func main() {
 	}
 	defer func() {
 		if err := resolver.risk.Close(); err != nil {
-			log.Printf("risk service close failed: %v", err)
+			logjson.Warn("risk service close failed", map[string]any{
+				"service": "dns-resolver",
+				"error":   err.Error(),
+			})
 		}
 	}()
 	logCacheStatus("dns-resolver", resolver.risk)
@@ -93,10 +101,12 @@ func main() {
 			defaultLimiter,
 			ratelimit.Tier{PathPrefix: "/dns-query", Limiter: dohLimiter},
 		)
-		log.Printf("dns-resolver rate limiting enabled (doh=%.0f/min, dot=%.0f/min, default=%.0f/min)",
-			config.Float64("SAFE_ROAD_RATELIMIT_DOH_RPM", 100),
-			config.Float64("SAFE_ROAD_RATELIMIT_DOT_RPM", 100),
-			config.Float64("SAFE_ROAD_RATELIMIT_DEFAULT_RPM", 60))
+		logjson.Info("rate limiting enabled", map[string]any{
+			"service":     "dns-resolver",
+			"doh_rpm":     config.Float64("SAFE_ROAD_RATELIMIT_DOH_RPM", 100),
+			"dot_rpm":     config.Float64("SAFE_ROAD_RATELIMIT_DOT_RPM", 100),
+			"default_rpm": config.Float64("SAFE_ROAD_RATELIMIT_DEFAULT_RPM", 60),
+		})
 	}
 
 	mux := http.NewServeMux()
@@ -113,10 +123,11 @@ func main() {
 	}
 
 	recoveryHandler := serve.Recovery(handler, resolver.metrics)
+	requestIDHandler := serve.WithRequestID(logRequests("dns-resolver", recoveryHandler, resolver.metrics))
 
 	server := &http.Server{
 		Addr:              addr,
-		Handler:           logRequests(recoveryHandler, resolver.metrics),
+		Handler:           requestIDHandler,
 		ReadHeaderTimeout: 5 * time.Second,
 		ReadTimeout:       10 * time.Second,
 		WriteTimeout:      10 * time.Second,
@@ -137,17 +148,32 @@ func main() {
 		if certFile != "" && keyFile != "" {
 			cert, certErr = tls.LoadX509KeyPair(certFile, keyFile)
 			if certErr != nil {
-				log.Printf("failed to load TLS keys: %v, falling back to self-signed cert", certErr)
+				logjson.Warn("failed to load TLS keys; falling back to self-signed cert", map[string]any{
+					"service":   "dns-resolver",
+					"cert_file": certFile,
+					"key_file":  keyFile,
+					"error":     certErr.Error(),
+				})
 				cert, certErr = generateSelfSignedCert()
 				if certErr != nil {
-					log.Fatalf("failed to generate self-signed cert: %v", certErr)
+					logjson.Error("failed to generate self-signed cert", map[string]any{
+						"service": "dns-resolver",
+						"error":   certErr.Error(),
+					})
+					os.Exit(1)
 				}
 			}
 		} else {
-			log.Println("TLS key files not configured, generating temporary self-signed cert")
+			logjson.Warn("TLS key files not configured; generating temporary self-signed cert", map[string]any{
+				"service": "dns-resolver",
+			})
 			cert, certErr = generateSelfSignedCert()
 			if certErr != nil {
-				log.Fatalf("failed to generate self-signed cert: %v", certErr)
+				logjson.Error("failed to generate self-signed cert", map[string]any{
+					"service": "dns-resolver",
+					"error":   certErr.Error(),
+				})
+				os.Exit(1)
 			}
 		}
 
@@ -173,7 +199,11 @@ func main() {
 
 	// Run HTTP DoH Server
 	go func() {
-		log.Printf("dns-resolver (DoH) listening on %s", addr)
+		logjson.Info("service listening", map[string]any{
+			"service": "dns-resolver",
+			"mode":    "doh",
+			"addr":    addr,
+		})
 		if err := serve.RunHTTPServer(server, shutdownTimeout); err != nil && !errors.Is(err, http.ErrServerClosed) {
 			errCh <- fmt.Errorf("DoH server error: %w", err)
 		} else {
@@ -184,7 +214,11 @@ func main() {
 	// Run DoT Server
 	if dotServer != nil {
 		go func() {
-			log.Printf("dns-resolver (DoT) listening on %s", dotServer.Addr)
+			logjson.Info("service listening", map[string]any{
+				"service": "dns-resolver",
+				"mode":    "dot",
+				"addr":    dotServer.Addr,
+			})
 			if err := dotServer.ListenAndServe(); err != nil && !errors.Is(err, net.ErrClosed) {
 				errCh <- fmt.Errorf("DoT server error: %w", err)
 			} else {
@@ -196,10 +230,16 @@ func main() {
 	// Wait for OS signals or server errors
 	select {
 	case sig := <-sigCh:
-		log.Printf("received signal %v, shutting down...", sig)
+		logjson.Info("shutdown requested", map[string]any{
+			"service": "dns-resolver",
+			"signal":  sig.String(),
+		})
 	case err := <-errCh:
 		if err != nil {
-			log.Printf("server error: %v", err)
+			logjson.Error("server error", map[string]any{
+				"service": "dns-resolver",
+				"error":   err.Error(),
+			})
 		}
 	}
 
@@ -207,19 +247,25 @@ func main() {
 	ctx, cancel := context.WithTimeout(context.Background(), shutdownTimeout)
 	defer cancel()
 
-	log.Println("stopping HTTP (DoH) server...")
+	logjson.Info("stopping HTTP (DoH) server", map[string]any{"service": "dns-resolver"})
 	if err := server.Shutdown(ctx); err != nil {
-		log.Printf("HTTP server shutdown error: %v", err)
+		logjson.Warn("HTTP server shutdown error", map[string]any{
+			"service": "dns-resolver",
+			"error":   err.Error(),
+		})
 	}
 
 	if dotServer != nil {
-		log.Println("stopping DNS-over-TLS (DoT) server...")
+		logjson.Info("stopping DNS-over-TLS (DoT) server", map[string]any{"service": "dns-resolver"})
 		if err := dotServer.ShutdownContext(ctx); err != nil {
-			log.Printf("DoT server shutdown error: %v", err)
+			logjson.Warn("DoT server shutdown error", map[string]any{
+				"service": "dns-resolver",
+				"error":   err.Error(),
+			})
 		}
 	}
 
-	log.Println("all services stopped gracefully.")
+	logjson.Info("all services stopped gracefully", map[string]any{"service": "dns-resolver"})
 }
 
 func healthHandler(service string) http.HandlerFunc {
@@ -269,7 +315,10 @@ func (a *app) metricsHandler(w http.ResponseWriter, r *http.Request) {
 		"service": "dns-resolver",
 		"status":  "ok",
 		"metrics": a.metrics.Snapshot(),
-		"time":    time.Now().UTC().Format(time.RFC3339Nano),
+		"upstream_doh": map[string]any{
+			"failures_total": dohFailureCount(a.metrics),
+		},
+		"time": time.Now().UTC().Format(time.RFC3339Nano),
 	})
 }
 
@@ -325,7 +374,15 @@ func (a *app) dohHandler(w http.ResponseWriter, r *http.Request) {
 
 	response, err := a.forwardDoH(r.Context(), wire)
 	if err != nil {
-		log.Printf("upstream DoH failed for %s: %v", questionDomain, err)
+		if a.metrics != nil {
+			a.metrics.IncCounter("upstream_doh_failures_total")
+		}
+		logjson.Warn("upstream DoH failed", correlation.Fields(r.Context(), map[string]any{
+			"service": "dns-resolver",
+			"domain":  questionDomain,
+			"error":   err.Error(),
+			"mode":    "doh",
+		}))
 		servfail, packErr := servfailDNSResponse(query)
 		if packErr != nil {
 			http.Error(w, "upstream DoH failed", http.StatusBadGateway)
@@ -418,7 +475,10 @@ func writeDNSMessage(w http.ResponseWriter, wire []byte) {
 	w.Header().Set("Content-Type", "application/dns-message")
 	w.WriteHeader(http.StatusOK)
 	if _, err := w.Write(wire); err != nil { // #nosec G705 -- DNS wire format binary, not HTML
-		log.Printf("write DNS response failed: %v", err)
+		logjson.Warn("write DNS response failed", map[string]any{
+			"service": "dns-resolver",
+			"error":   err.Error(),
+		})
 	}
 }
 
@@ -428,13 +488,16 @@ func logCacheStatus(service string, riskService *risk.Service) {
 		return
 	}
 	if status.Status == "ok" {
-		log.Printf("%s redis cache connected", service)
+		logjson.Info("redis cache connected", map[string]any{"service": service})
 		return
 	}
-	log.Printf("%s redis cache unavailable at startup, continuing without hard dependency: %s", service, status.Error)
+	logjson.Warn("redis cache unavailable at startup", map[string]any{
+		"service": service,
+		"error":   status.Error,
+	})
 }
 
-func logRequests(next http.Handler, metrics *observability.Registry) http.Handler {
+func logRequests(service string, next http.Handler, metrics *observability.Registry) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		started := time.Now()
 		recorder := &statusLoggingResponseWriter{ResponseWriter: w, statusCode: http.StatusOK}
@@ -442,7 +505,18 @@ func logRequests(next http.Handler, metrics *observability.Registry) http.Handle
 		if metrics != nil && r.Context().Value(serve.ObservedPanicKey) == nil {
 			metrics.Observe(r.Method, r.URL.Path, recorder.statusCode, recorder.bytesWritten, time.Since(started))
 		}
-		log.Printf("%s %s %d %dB %s", sanitizeLog(r.Method), sanitizeLog(r.URL.Path), recorder.statusCode, recorder.bytesWritten, time.Since(started).Truncate(time.Millisecond)) // #nosec G706 -- request values are escaped by sanitizeLog before logging.
+		clientInfo := extractClientInfo(r)
+		logjson.Info("http request", map[string]any{
+			"service":     service,
+			"request_id":  serve.RequestID(r.Context()),
+			"method":      sanitizeLog(r.Method),
+			"path":        sanitizeLog(r.URL.Path),
+			"status":      recorder.statusCode,
+			"bytes":       recorder.bytesWritten,
+			"duration_ms": time.Since(started).Milliseconds(),
+			"client_ip":   clientInfo.IP,
+			"client_id":   clientInfo.ClientID,
+		})
 	})
 }
 
@@ -470,7 +544,10 @@ func writeJSON(w http.ResponseWriter, statusCode int, payload any) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(statusCode)
 	if err := json.NewEncoder(w).Encode(payload); err != nil {
-		log.Printf("write response failed: %v", err)
+		logjson.Error("write response failed", map[string]any{
+			"service": "dns-resolver",
+			"error":   err.Error(),
+		})
 	}
 }
 
@@ -555,10 +632,16 @@ func generateSelfSignedCert() (tls.Certificate, error) {
 
 // dotHandler xử lý các truy vấn DNS-over-TLS bảo mật trực tiếp trên giao thức TCP TLS
 func (a *app) dotHandler(w dns.ResponseWriter, r *dns.Msg) {
+	ctx := correlation.WithRunID(context.Background(), correlation.NewID("dot"))
+
 	// Panic Recovery để bảo vệ máy chủ khỏi bị sập
 	defer func() {
 		if rec := recover(); rec != nil {
-			log.Printf("panic recovered in DoT handler: %v", rec)
+			logjson.Error("panic recovered in DoT handler", correlation.Fields(ctx, map[string]any{
+				"service": "dns-resolver",
+				"panic":   fmt.Sprint(rec),
+				"mode":    "dot",
+			}))
 			sendServfail(w, r)
 		}
 	}()
@@ -588,10 +671,10 @@ func (a *app) dotHandler(w dns.ResponseWriter, r *dns.Msg) {
 	clientInfo := risk.ClientInfo{IP: clientIP}
 
 	// Tạo context có giới hạn thời gian (Timeout) để ngăn chặn rò rỉ goroutine
-	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	requestCtx, cancel := context.WithTimeout(ctx, 3*time.Second)
 	defer cancel()
 
-	policy := a.risk.Policy(ctx, questionDomain, clientInfo)
+	policy := a.risk.Policy(requestCtx, questionDomain, clientInfo)
 
 	if policy.Policy == "block" {
 		responseMsg, err := a.blockedDNSMessage(r)
@@ -608,9 +691,17 @@ func (a *app) dotHandler(w dns.ResponseWriter, r *dns.Msg) {
 		return
 	}
 
-	responseWire, err := a.forwardDoH(ctx, wire)
+	responseWire, err := a.forwardDoH(requestCtx, wire)
 	if err != nil {
-		log.Printf("upstream DoH failed for %s (DoT): %v", questionDomain, err)
+		if a.metrics != nil {
+			a.metrics.IncCounter("upstream_doh_failures_total")
+		}
+		logjson.Warn("upstream DoH failed", correlation.Fields(requestCtx, map[string]any{
+			"service": "dns-resolver",
+			"domain":  questionDomain,
+			"error":   err.Error(),
+			"mode":    "dot",
+		}))
 		sendServfail(w, r)
 		return
 	}
@@ -663,4 +754,11 @@ func sendServfail(w dns.ResponseWriter, r *dns.Msg) {
 	response.SetRcode(r, dns.RcodeServerFailure)
 	response.RecursionAvailable = true
 	_ = w.WriteMsg(response)
+}
+
+func dohFailureCount(metrics *observability.Registry) int64 {
+	if metrics == nil {
+		return 0
+	}
+	return metrics.Snapshot().Counters["upstream_doh_failures_total"]
 }

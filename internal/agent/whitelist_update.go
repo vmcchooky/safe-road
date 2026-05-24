@@ -8,12 +8,13 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"log"
 	"net/http"
 	"strings"
 	"time"
 
 	"safe-road/internal/analysis"
+	"safe-road/internal/correlation"
+	"safe-road/internal/logjson"
 	"safe-road/internal/risk"
 	"safe-road/internal/store"
 )
@@ -61,32 +62,59 @@ func (t *WhitelistUpdateTask) Run(ctx context.Context) error {
 		return fmt.Errorf("whitelist update source URL is empty")
 	}
 
-	log.Printf("agent whitelist_update: starting update from %s", t.config.SourceURL)
+	logjson.Info("agent whitelist update started", correlation.Fields(ctx, map[string]any{
+		"service": "core-api",
+		"task":    "whitelist_update",
+		"source":  t.config.SourceURL,
+	}))
 	_ = t.store.RecordAgentEvent("whitelist_update", "whitelist_update_started", "", "Download and import started")
 
 	start := time.Now()
 	domains, err := t.downloadAndParse(ctx)
 	if err != nil {
-		log.Printf("agent whitelist_update error: %v", err)
+		logjson.Error("agent whitelist update failed", correlation.Fields(ctx, map[string]any{
+			"service": "core-api",
+			"task":    "whitelist_update",
+			"source":  t.config.SourceURL,
+			"error":   err.Error(),
+		}))
 		details := fmt.Sprintf(`{"error":%q}`, err.Error())
 		_ = t.store.RecordAgentEvent("whitelist_update", "whitelist_update_failed", "", details)
 		return err
 	}
 
-	log.Printf("agent whitelist_update: parsed %d valid domains, updating SQLite database...", len(domains))
+	logjson.Info("agent whitelist update parsed", correlation.Fields(ctx, map[string]any{
+		"service": "core-api",
+		"task":    "whitelist_update",
+		"domains": len(domains),
+	}))
 
 	// Update SQLite
 	if err := t.store.UpdateWhitelist(domains); err != nil {
-		log.Printf("agent whitelist_update error updating SQLite: %v", err)
+		logjson.Error("agent whitelist update sqlite write failed", correlation.Fields(ctx, map[string]any{
+			"service": "core-api",
+			"task":    "whitelist_update",
+			"domains": len(domains),
+			"error":   err.Error(),
+		}))
 		details := fmt.Sprintf(`{"error":%q}`, err.Error())
 		_ = t.store.RecordAgentEvent("whitelist_update", "whitelist_update_failed", "", details)
 		return fmt.Errorf("update sqlite: %w", err)
 	}
 
 	// Reload RAM Bloom Filter
-	log.Printf("agent whitelist_update: SQLite database updated, rebuilding RAM Bloom Filter...")
+	logjson.Info("agent whitelist update rebuilding bloom filter", correlation.Fields(ctx, map[string]any{
+		"service": "core-api",
+		"task":    "whitelist_update",
+		"domains": len(domains),
+	}))
 	if err := t.whitelist.LoadFromDB(); err != nil {
-		log.Printf("agent whitelist_update error rebuilding Bloom Filter: %v", err)
+		logjson.Error("agent whitelist update bloom rebuild failed", correlation.Fields(ctx, map[string]any{
+			"service": "core-api",
+			"task":    "whitelist_update",
+			"domains": len(domains),
+			"error":   err.Error(),
+		}))
 		details := fmt.Sprintf(`{"error":%q}`, err.Error())
 		_ = t.store.RecordAgentEvent("whitelist_update", "whitelist_update_failed", "", details)
 		return fmt.Errorf("reload bloom filter: %w", err)
@@ -100,7 +128,12 @@ func (t *WhitelistUpdateTask) Run(ctx context.Context) error {
 	statsJSON, _ := json.Marshal(stats)
 	_ = t.store.RecordAgentEvent("whitelist_update", "whitelist_update_completed", "", string(statsJSON))
 
-	log.Printf("agent whitelist_update: successfully updated whitelist with %d domains in %v", len(domains), elapsed)
+	logjson.Info("agent whitelist update completed", correlation.Fields(ctx, map[string]any{
+		"service":     "core-api",
+		"task":        "whitelist_update",
+		"domains":     len(domains),
+		"duration_ms": elapsed.Milliseconds(),
+	}))
 	return nil
 }
 
@@ -134,7 +167,11 @@ func (t *WhitelistUpdateTask) downloadAndParse(ctx context.Context) ([]string, e
 	zipReader, err := zip.NewReader(bytes.NewReader(buf.Bytes()), int64(buf.Len()))
 	if err != nil {
 		// Fallback: If it's not a ZIP, check if it's a raw CSV file
-		log.Printf("agent whitelist_update: failed to parse as ZIP, trying raw CSV fallback...")
+		logjson.Warn("agent whitelist update zip parse failed, trying raw csv fallback", correlation.Fields(ctx, map[string]any{
+			"service": "core-api",
+			"task":    "whitelist_update",
+			"source":  t.config.SourceURL,
+		}))
 		return t.parseCSV(bytes.NewReader(buf.Bytes()))
 	}
 

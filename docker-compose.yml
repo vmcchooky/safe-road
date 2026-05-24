@@ -2,12 +2,11 @@ services:
   caddy:
     profiles: ["production-edge"]
     image: caddy:2-alpine
+    env_file:
+      - .env
     environment:
       SAFE_ROAD_PUBLIC_HOST: ${SAFE_ROAD_PUBLIC_HOST:-localhost}
       SAFE_ROAD_CADDY_EMAIL: ${SAFE_ROAD_CADDY_EMAIL:-}
-    ports:
-      - "80:80"
-      - "443:443"
     volumes:
       - ./Caddyfile:/etc/caddy/Caddyfile:ro
       - caddy-data:/data
@@ -16,6 +15,11 @@ services:
       - core-api
       - dns-resolver
     restart: unless-stopped
+    logging:
+      driver: json-file
+      options:
+        max-size: ${SAFE_ROAD_DOCKER_LOG_MAX_SIZE:-10m}
+        max-file: "${SAFE_ROAD_DOCKER_LOG_MAX_FILE:-5}"
 
   redis:
     image: redis:7-alpine
@@ -23,6 +27,11 @@ services:
     volumes:
       - redis-data:/data
     restart: unless-stopped
+    logging:
+      driver: json-file
+      options:
+        max-size: ${SAFE_ROAD_DOCKER_LOG_MAX_SIZE:-10m}
+        max-file: "${SAFE_ROAD_DOCKER_LOG_MAX_FILE:-5}"
     healthcheck:
       test: ["CMD-SHELL", "redis-cli ping | grep PONG"]
       interval: 10s
@@ -34,6 +43,8 @@ services:
       context: .
       args:
         SERVICE: core-api
+    env_file:
+      - .env
     environment:
       SAFE_ROAD_HEALTHCHECK_PORT: "8080"
       SAFE_ROAD_HEALTHCHECK_PATH: ${SAFE_ROAD_HEALTHCHECK_PATH:-/healthz}
@@ -46,22 +57,39 @@ services:
       SAFE_ROAD_CACHE_TTL_ALLOWED_SECONDS: ${SAFE_ROAD_CACHE_TTL_ALLOWED_SECONDS:-10800}
       SAFE_ROAD_CACHE_TTL_SUSPICIOUS_SECONDS: ${SAFE_ROAD_CACHE_TTL_SUSPICIOUS_SECONDS:-3600}
       SAFE_ROAD_CACHE_TTL_BLOCKED_SECONDS: ${SAFE_ROAD_CACHE_TTL_BLOCKED_SECONDS:-21600}
+      SAFE_ROAD_ENRICH_ENABLED: ${SAFE_ROAD_ENRICH_ENABLED:-true}
+      SAFE_ROAD_ENRICH_TIMEOUT_MS: ${SAFE_ROAD_ENRICH_TIMEOUT_MS:-3000}
       SAFE_ROAD_DASHBOARD_RECENT_LIMIT: ${SAFE_ROAD_DASHBOARD_RECENT_LIMIT:-25}
       SAFE_ROAD_SQLITE_PATH: ${SAFE_ROAD_SQLITE_PATH:-/app/data/safe-road.db}
       SAFE_ROAD_TELEMETRY_RETENTION_DAYS: ${SAFE_ROAD_TELEMETRY_RETENTION_DAYS:-30}
+      SAFE_ROAD_RATELIMIT_ENABLED: ${SAFE_ROAD_RATELIMIT_ENABLED:-true}
+      SAFE_ROAD_RATELIMIT_ANALYZE_RPM: ${SAFE_ROAD_RATELIMIT_ANALYZE_RPM:-10}
+      SAFE_ROAD_RATELIMIT_ANALYZE_BURST: ${SAFE_ROAD_RATELIMIT_ANALYZE_BURST:-5}
+      SAFE_ROAD_RATELIMIT_OVERRIDE_RPM: ${SAFE_ROAD_RATELIMIT_OVERRIDE_RPM:-20}
+      SAFE_ROAD_RATELIMIT_OVERRIDE_BURST: ${SAFE_ROAD_RATELIMIT_OVERRIDE_BURST:-5}
+      SAFE_ROAD_RATELIMIT_TELEMETRY_RPM: ${SAFE_ROAD_RATELIMIT_TELEMETRY_RPM:-30}
+      SAFE_ROAD_RATELIMIT_TELEMETRY_BURST: ${SAFE_ROAD_RATELIMIT_TELEMETRY_BURST:-10}
+      SAFE_ROAD_RATELIMIT_DEFAULT_RPM: ${SAFE_ROAD_RATELIMIT_DEFAULT_RPM:-60}
+      SAFE_ROAD_RATELIMIT_DEFAULT_BURST: ${SAFE_ROAD_RATELIMIT_DEFAULT_BURST:-15}
     volumes:
       - app-data:/app/data
-    ports:
-      - "8080:8080"
+      - ./ops/secrets:/app/ops/secrets:ro
     depends_on:
       - redis
     restart: unless-stopped
+    logging:
+      driver: json-file
+      options:
+        max-size: ${SAFE_ROAD_DOCKER_LOG_MAX_SIZE:-10m}
+        max-file: "${SAFE_ROAD_DOCKER_LOG_MAX_FILE:-5}"
 
   dns-resolver:
     build:
       context: .
       args:
         SERVICE: dns-resolver
+    env_file:
+      - .env
     environment:
       SAFE_ROAD_HEALTHCHECK_PORT: "8081"
       SAFE_ROAD_HEALTHCHECK_PATH: ${SAFE_ROAD_HEALTHCHECK_PATH:-/healthz}
@@ -74,12 +102,19 @@ services:
       SAFE_ROAD_CACHE_TTL_ALLOWED_SECONDS: ${SAFE_ROAD_CACHE_TTL_ALLOWED_SECONDS:-10800}
       SAFE_ROAD_CACHE_TTL_SUSPICIOUS_SECONDS: ${SAFE_ROAD_CACHE_TTL_SUSPICIOUS_SECONDS:-3600}
       SAFE_ROAD_CACHE_TTL_BLOCKED_SECONDS: ${SAFE_ROAD_CACHE_TTL_BLOCKED_SECONDS:-21600}
+      SAFE_ROAD_ENRICH_ENABLED: ${SAFE_ROAD_ENRICH_ENABLED:-true}
+      SAFE_ROAD_ENRICH_TIMEOUT_MS: ${SAFE_ROAD_ENRICH_TIMEOUT_MS:-3000}
       SAFE_ROAD_UPSTREAM_DOH_URL: ${SAFE_ROAD_UPSTREAM_DOH_URL:-https://cloudflare-dns.com/dns-query}
       SAFE_ROAD_UPSTREAM_DOH_TIMEOUT_MS: ${SAFE_ROAD_UPSTREAM_DOH_TIMEOUT_MS:-3000}
       SAFE_ROAD_BLOCK_PAGE_IP: ${SAFE_ROAD_BLOCK_PAGE_IP:-127.0.0.1}
       SAFE_ROAD_DNS_BLOCK_TTL_SECONDS: ${SAFE_ROAD_DNS_BLOCK_TTL_SECONDS:-60}
       SAFE_ROAD_SQLITE_PATH: ${SAFE_ROAD_SQLITE_PATH:-/app/data/safe-road.db}
       SAFE_ROAD_TELEMETRY_RETENTION_DAYS: ${SAFE_ROAD_TELEMETRY_RETENTION_DAYS:-30}
+      SAFE_ROAD_RATELIMIT_ENABLED: ${SAFE_ROAD_RATELIMIT_ENABLED:-true}
+      SAFE_ROAD_RATELIMIT_DOH_RPM: ${SAFE_ROAD_RATELIMIT_DOH_RPM:-100}
+      SAFE_ROAD_RATELIMIT_DOH_BURST: ${SAFE_ROAD_RATELIMIT_DOH_BURST:-20}
+      SAFE_ROAD_RATELIMIT_DEFAULT_RPM: ${SAFE_ROAD_RATELIMIT_DEFAULT_RPM:-60}
+      SAFE_ROAD_RATELIMIT_DEFAULT_BURST: ${SAFE_ROAD_RATELIMIT_DEFAULT_BURST:-15}
       SAFE_ROAD_DNS_DOT_ENABLED: ${SAFE_ROAD_DNS_DOT_ENABLED:-true}
       SAFE_ROAD_DNS_DOT_ADDR: :${SAFE_ROAD_DNS_DOT_CONTAINER_PORT:-8533}
       SAFE_ROAD_DNS_DOT_CERT_FILE: ${SAFE_ROAD_DNS_DOT_CERT_FILE:-}
@@ -88,12 +123,15 @@ services:
       SAFE_ROAD_RATELIMIT_DOT_BURST: ${SAFE_ROAD_RATELIMIT_DOT_BURST:-20}
     volumes:
       - app-data:/app/data
-    ports:
-      - "8081:8081"
-      - "${SAFE_ROAD_DNS_DOT_PUBLISHED_PORT:-853}:${SAFE_ROAD_DNS_DOT_CONTAINER_PORT:-8533}"
+      - ./ops/secrets:/app/ops/secrets:ro
     depends_on:
       - redis
     restart: unless-stopped
+    logging:
+      driver: json-file
+      options:
+        max-size: ${SAFE_ROAD_DOCKER_LOG_MAX_SIZE:-10m}
+        max-file: "${SAFE_ROAD_DOCKER_LOG_MAX_FILE:-5}"
 
   feed-syncd:
     profiles: ["feed-sync"]
@@ -101,6 +139,8 @@ services:
       context: .
       args:
         SERVICE: feed-syncd
+    env_file:
+      - .env
     environment:
       SAFE_ROAD_THREAT_FEED_SOURCE: ${SAFE_ROAD_THREAT_FEED_SOURCE:-}
       SAFE_ROAD_THREAT_FEED_KEY: ${SAFE_ROAD_THREAT_FEED_KEY:-safe-road:threat:feed}
@@ -111,7 +151,14 @@ services:
       SAFE_ROAD_FEED_SYNC_TIMEOUT_MS: ${SAFE_ROAD_FEED_SYNC_TIMEOUT_MS:-30000}
     depends_on:
       - redis
+    volumes:
+      - ./ops/secrets:/app/ops/secrets:ro
     restart: unless-stopped
+    logging:
+      driver: json-file
+      options:
+        max-size: ${SAFE_ROAD_DOCKER_LOG_MAX_SIZE:-10m}
+        max-file: "${SAFE_ROAD_DOCKER_LOG_MAX_FILE:-5}"
 
   feed-sync:
     profiles: ["feed-sync"]
@@ -119,6 +166,8 @@ services:
       context: .
       args:
         SERVICE: feed-sync
+    env_file:
+      - .env
     environment:
       SAFE_ROAD_THREAT_FEED_SOURCE: ${SAFE_ROAD_THREAT_FEED_SOURCE:-}
       SAFE_ROAD_THREAT_FEED_KEY: ${SAFE_ROAD_THREAT_FEED_KEY:-safe-road:threat:feed}
@@ -128,7 +177,14 @@ services:
       SAFE_ROAD_FEED_SYNC_TIMEOUT_MS: ${SAFE_ROAD_FEED_SYNC_TIMEOUT_MS:-30000}
     depends_on:
       - redis
+    volumes:
+      - ./ops/secrets:/app/ops/secrets:ro
     restart: "no"
+    logging:
+      driver: json-file
+      options:
+        max-size: ${SAFE_ROAD_DOCKER_LOG_MAX_SIZE:-10m}
+        max-file: "${SAFE_ROAD_DOCKER_LOG_MAX_FILE:-5}"
 
 volumes:
   redis-data:

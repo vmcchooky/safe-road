@@ -44,3 +44,10 @@ func TestParseCSV(t *testing.T) {
 		t.Fatalf("unexpected domains: %s", got)
 	}
 }
+
+func TestParseRejectsOverlongTextLine(t *testing.T) {
+	_, err := Parse(strings.NewReader(strings.Repeat("a", 1024*1024+1)))
+	if err == nil || !strings.Contains(err.Error(), "feed line exceeds") {
+		t.Fatalf("expected overlong line error, got %v", err)
+	}
+}

@@ -1,7 +1,9 @@
 param(
   [Parameter(Position = 0)]
-  [ValidateSet('help', 'deploy', 'status', 'backup', 'restore', 'prune')]
+  [ValidateSet('help', 'deploy', 'deploy-dev', 'status', 'backup', 'restore', 'prune', 'feed-sync')]
   [string]$Command = 'help',
+  [ValidateSet('production', 'dev')]
+  [string]$Stack = 'production',
   [string]$BackupPath,
   [int]$Keep = 7,
   [int]$LogRetentionDays = 7,
@@ -22,18 +24,43 @@ function Write-Section {
 }
 
 function Invoke-Compose {
-  param([string[]]$Args)
+  param(
+    [string[]]$Args,
+    [string]$TargetStack = $Stack,
+    [switch]$UseProductionProfile
+  )
 
-  & docker compose @Args
+  $composeArgs = @('-f', 'docker-compose.yml')
+  switch ($TargetStack) {
+    'production' { $composeArgs += @('-f', 'docker-compose.production.yml') }
+    'dev' { $composeArgs += @('-f', 'docker-compose.dev.yml') }
+    default { throw "unsupported stack: $TargetStack" }
+  }
+  if ($UseProductionProfile) {
+    $composeArgs += @('--profile', 'production-edge')
+  }
+  $composeArgs += $Args
+
+  & docker compose @composeArgs
   if ($LASTEXITCODE -ne 0) {
-    throw "docker compose $($Args -join ' ') failed with exit code $LASTEXITCODE"
+    throw "docker compose $($composeArgs -join ' ') failed with exit code $LASTEXITCODE"
   }
 }
 
 function Get-ComposeContainerId {
-  param([string]$ServiceName)
+  param(
+    [string]$ServiceName,
+    [string]$TargetStack = $Stack
+  )
 
-  $containerId = (& docker compose ps -q $ServiceName).Trim()
+  $composeArgs = @('-f', 'docker-compose.yml')
+  switch ($TargetStack) {
+    'production' { $composeArgs += @('-f', 'docker-compose.production.yml') }
+    'dev' { $composeArgs += @('-f', 'docker-compose.dev.yml') }
+    default { throw "unsupported stack: $TargetStack" }
+  }
+
+  $containerId = (& docker compose @composeArgs ps -q $ServiceName).Trim()
   if (-not $containerId) {
     throw "service '$ServiceName' is not running"
   }
@@ -68,7 +95,7 @@ function New-Backup {
     New-Item -ItemType Directory -Force -Path $BackupsRoot | Out-Null
   }
 
-  Invoke-Compose @('exec', '-T', 'redis', 'redis-cli', 'SAVE')
+  Invoke-Compose -Args @('exec', '-T', 'redis', 'redis-cli', 'SAVE')
   $containerId = Get-ComposeContainerId -ServiceName 'redis'
   $timestamp = Get-Date -Format 'yyyyMMdd-HHmmss'
   $targetDir = Join-Path $BackupsRoot $timestamp
@@ -126,7 +153,7 @@ function Restore-Backup {
   param([string]$Path)
 
   $backupFile = Resolve-BackupFile -Path $Path
-  Invoke-Compose @('stop', 'redis')
+  Invoke-Compose -Args @('stop', 'redis')
   $containerId = Get-ComposeContainerId -ServiceName 'redis'
 
   & docker cp $backupFile "${containerId}:/data/dump.rdb"
@@ -134,7 +161,7 @@ function Restore-Backup {
     throw 'docker cp failed while restoring the Redis snapshot'
   }
 
-  Invoke-Compose @('start', 'redis')
+  Invoke-Compose -Args @('start', 'redis')
   Write-Host "Restored Redis snapshot from $backupFile"
 }
 
@@ -189,18 +216,44 @@ Safe Road ops helper
 
 Usage:
   pwsh ./scripts/safe-road.ps1 deploy
+  pwsh ./scripts/safe-road.ps1 deploy-dev
   pwsh ./scripts/safe-road.ps1 status
   pwsh ./scripts/safe-road.ps1 backup
   pwsh ./scripts/safe-road.ps1 restore [-BackupPath <path>]
   pwsh ./scripts/safe-road.ps1 prune [-Keep 7] [-LogRetentionDays 7]
+  pwsh ./scripts/safe-road.ps1 feed-sync
 
 Commands:
-  deploy   Build and start the Compose stack, then wait for core-api and dns-resolver.
+  deploy      Build and start the production Compose stack, then wait for loopback health.
+  deploy-dev  Build and start the local developer stack.
   status   Show Compose status and probe the local health endpoints.
   backup   Save a Redis RDB snapshot into ./backups/redis/<timestamp>/dump.rdb.
   restore  Restore Redis from a snapshot file or backup directory.
   prune    Keep the newest backup directories and delete stale tmp/*.log files.
+  feed-sync Run the configured threat feed sync sources once.
+
+Options:
+  -Stack production|dev   Choose the stack used by status/backup/restore/prune helpers.
 '@ | Write-Host
+}
+
+function Resolve-FeedSources {
+  if ($env:SAFE_ROAD_AGENT_FEED_SOURCES) {
+    return $env:SAFE_ROAD_AGENT_FEED_SOURCES -split ','
+  }
+
+  if ($env:SAFE_ROAD_AGENT_FEED_PRESET -eq 'production-free') {
+    return @(
+      'https://urlhaus.abuse.ch/downloads/csv_recent/',
+      'https://raw.githubusercontent.com/openphish/public_feed/refs/heads/main/feed.txt'
+    )
+  }
+
+  if ($env:SAFE_ROAD_THREAT_FEED_SOURCE) {
+    return @($env:SAFE_ROAD_THREAT_FEED_SOURCE)
+  }
+
+  return @()
 }
 
 switch ($Command) {
@@ -213,14 +266,21 @@ switch ($Command) {
     if ($FeedSync) {
       $composeArgs = @('--profile', 'feed-sync') + $composeArgs
     }
-    Invoke-Compose $composeArgs
+    Invoke-Compose -Args $composeArgs -TargetStack 'production' -UseProductionProfile
+    Wait-ForHealth -Url 'http://localhost:8080/healthz' -Name 'core-api'
+    Wait-ForHealth -Url 'http://localhost:8081/healthz' -Name 'dns-resolver'
+    Write-Host 'Deployment healthy.' -ForegroundColor Green
+  }
+  'deploy-dev' {
+    Write-Section 'Deploying Safe Road (dev stack)'
+    Invoke-Compose -Args @('up', '-d', '--build') -TargetStack 'dev'
     Wait-ForHealth -Url 'http://localhost:8080/healthz' -Name 'core-api'
     Wait-ForHealth -Url 'http://localhost:8081/healthz' -Name 'dns-resolver'
     Write-Host 'Deployment healthy.' -ForegroundColor Green
   }
   'status' {
     Write-Section 'Compose status'
-    Invoke-Compose @('ps')
+    Invoke-Compose -Args @('ps')
     Write-Section 'Health checks'
     foreach ($item in @(
       @{ Name = 'core-api'; Url = 'http://localhost:8080/healthz' },
@@ -246,6 +306,17 @@ switch ($Command) {
     Write-Section 'Pruning backups and logs'
     Prune-Backups -KeepCount $Keep
     Prune-Logs -RetentionDays $LogRetentionDays
+  }
+  'feed-sync' {
+    $sources = Resolve-FeedSources | ForEach-Object { $_.Trim() } | Where-Object { $_ }
+    if (-not $sources) {
+      throw 'No feed sources configured. Set SAFE_ROAD_AGENT_FEED_SOURCES, SAFE_ROAD_AGENT_FEED_PRESET, or SAFE_ROAD_THREAT_FEED_SOURCE.'
+    }
+
+    foreach ($source in $sources) {
+      Write-Section "Syncing $source"
+      Invoke-Compose -Args @('--profile', 'feed-sync', 'run', '--rm', 'feed-sync', '/app/service', '-source', $source)
+    }
   }
   default {
     throw "unsupported command: $Command"

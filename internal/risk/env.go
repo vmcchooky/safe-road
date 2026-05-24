@@ -1,18 +1,31 @@
 package risk
 
 import (
-	"log"
 	"time"
 
 	"safe-road/internal/cache"
 	"safe-road/internal/config"
+	"safe-road/internal/logjson"
 	"safe-road/internal/store"
 )
 
 func NewServiceFromEnv() *Service {
+	readSecret := func(key string) string {
+		value, err := config.SecretStringE(key)
+		if err != nil {
+			logjson.Warn("secret load failed; using fallback behavior", map[string]any{
+				"service": "risk",
+				"key":     key,
+				"error":   err.Error(),
+			})
+			return ""
+		}
+		return value
+	}
+
 	redisCache := cache.NewRedis(
 		config.String("SAFE_ROAD_REDIS_ADDR", ""),
-		config.String("SAFE_ROAD_REDIS_PASSWORD", ""),
+		readSecret("SAFE_ROAD_REDIS_PASSWORD"),
 		config.Int("SAFE_ROAD_REDIS_DB", 0),
 	)
 
@@ -20,7 +33,11 @@ func NewServiceFromEnv() *Service {
 	retentionDays := config.Int("SAFE_ROAD_TELEMETRY_RETENTION_DAYS", 30)
 	storeDB, err := store.New(sqlitePath, retentionDays)
 	if err != nil {
-		log.Printf("sqlite store initialization failed, continuing without persistence: %v", err)
+		logjson.Warn("sqlite store initialization failed; continuing without persistence", map[string]any{
+			"service": "risk",
+			"path":    sqlitePath,
+			"error":   err.Error(),
+		})
 	}
 
 	return NewService(Options{
@@ -33,7 +50,7 @@ func NewServiceFromEnv() *Service {
 		ThreatFeedKey:  config.String("SAFE_ROAD_THREAT_FEED_KEY", defaultThreatFeedKey),
 		AIProvider:     config.String("SAFE_ROAD_AI_PROVIDER", "gemini"),
 		GeminiBaseURL:  config.String("SAFE_ROAD_GEMINI_BASE_URL", "https://generativelanguage.googleapis.com/v1beta"),
-		GeminiAPIKey:   config.String("SAFE_ROAD_GEMINI_API_KEY", ""),
+		GeminiAPIKey:   readSecret("SAFE_ROAD_GEMINI_API_KEY"),
 		GeminiModel:    config.String("SAFE_ROAD_GEMINI_MODEL", "gemini-2.5-flash-lite"),
 		GeminiTimeout:  config.DurationMillis("SAFE_ROAD_GEMINI_TIMEOUT_MS", 3*time.Second),
 		OllamaBaseURL:  config.String("SAFE_ROAD_OLLAMA_BASE_URL", "http://localhost:11434"),

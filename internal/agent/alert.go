@@ -3,9 +3,12 @@ package agent
 import (
 	"bytes"
 	"context"
+	"crypto/tls"
 	"encoding/json"
+	"errors"
 	"fmt"
-	"log"
+	"html"
+	"net"
 	"net/http"
 	"net/smtp"
 	"strings"
@@ -13,6 +16,8 @@ import (
 	"time"
 
 	"safe-road/internal/analysis"
+	"safe-road/internal/correlation"
+	"safe-road/internal/logjson"
 	"safe-road/internal/store"
 )
 
@@ -32,12 +37,13 @@ type AlertConfig struct {
 	SlackWebhookURL string
 
 	// Email (SMTP) settings
-	EmailEnabled  bool
-	EmailSMTPHost string
-	EmailSMTPPort int
-	EmailFrom     string
-	EmailPassword string
-	EmailTo       string
+	EmailEnabled      bool
+	EmailSMTPHost     string
+	EmailSMTPPort     int
+	EmailSMTPUsername string
+	EmailFrom         string
+	EmailPassword     string
+	EmailTo           string
 }
 
 // AlertTask sends webhook notifications when significant agent events occur
@@ -84,6 +90,9 @@ func NewAlertTask(db *store.DB, cfg AlertConfig) *AlertTask {
 	}
 	if cfg.Timeout <= 0 {
 		cfg.Timeout = 10 * time.Second
+	}
+	if cfg.EmailSMTPUsername == "" {
+		cfg.EmailSMTPUsername = cfg.EmailFrom
 	}
 	return &AlertTask{
 		store:     db,
@@ -178,29 +187,44 @@ func (t *AlertTask) Run(ctx context.Context) error {
 	// 2. Send critical notifications if there are any Vietnam spoofing events
 	if len(criticalEvents) > 0 {
 		if hasTelegram {
-			tgCtx, tgCancel := context.WithTimeout(context.Background(), t.config.Timeout) // #nosec G118 -- background goroutine, not request-scoped
+			tgBaseCtx := correlation.WithRunID(context.Background(), correlation.RunID(ctx))
+			tgCtx, tgCancel := context.WithTimeout(tgBaseCtx, t.config.Timeout)
 			go func() {
 				defer tgCancel()
 				if err := t.sendTelegram(tgCtx, criticalEvents); err != nil {
-					log.Printf("failed to send telegram alert: %v", err)
+					logjson.Error("telegram alert failed", correlation.Fields(tgCtx, map[string]any{
+						"service": "core-api",
+						"task":    "alert",
+						"error":   err.Error(),
+					}))
 				}
 			}()
 		}
 		if hasSlack {
-			slCtx, slCancel := context.WithTimeout(context.Background(), t.config.Timeout) // #nosec G118 -- background goroutine, not request-scoped
+			slBaseCtx := correlation.WithRunID(context.Background(), correlation.RunID(ctx))
+			slCtx, slCancel := context.WithTimeout(slBaseCtx, t.config.Timeout)
 			go func() {
 				defer slCancel()
 				if err := t.sendSlack(slCtx, criticalEvents); err != nil {
-					log.Printf("failed to send slack alert: %v", err)
+					logjson.Error("slack alert failed", correlation.Fields(slCtx, map[string]any{
+						"service": "core-api",
+						"task":    "alert",
+						"error":   err.Error(),
+					}))
 				}
 			}()
 		}
 		if hasEmail {
-			emCtx, emCancel := context.WithTimeout(context.Background(), t.config.Timeout) // #nosec G118 -- background goroutine, not request-scoped
+			emBaseCtx := correlation.WithRunID(context.Background(), correlation.RunID(ctx))
+			emCtx, emCancel := context.WithTimeout(emBaseCtx, t.config.Timeout)
 			go func() {
 				defer emCancel()
 				if err := t.sendEmail(emCtx, criticalEvents); err != nil {
-					log.Printf("failed to send email alert: %v", err)
+					logjson.Error("email alert failed", correlation.Fields(emCtx, map[string]any{
+						"service": "core-api",
+						"task":    "alert",
+						"error":   err.Error(),
+					}))
 				}
 			}()
 		}
@@ -214,7 +238,12 @@ func (t *AlertTask) Run(ctx context.Context) error {
 	_ = t.store.RecordAgentEvent("alert", "alert_sent", "",
 		fmt.Sprintf(`{"events_count":%d,"critical_count":%d}`, len(events), len(criticalEvents)))
 
-	log.Printf("agent alert triggered: %d events (%d critical)", len(events), len(criticalEvents))
+	logjson.Info("agent alert triggered", correlation.Fields(ctx, map[string]any{
+		"service":         "core-api",
+		"task":            "alert",
+		"events":          len(events),
+		"critical_events": len(criticalEvents),
+	}))
 
 	if len(errorsList) > 0 {
 		errStr := strings.Join(errorsList, "; ")
@@ -367,10 +396,11 @@ func (t *AlertTask) sendEmail(ctx context.Context, criticalEvents []SpoofResult)
 	host := t.config.EmailSMTPHost
 	port := t.config.EmailSMTPPort
 	from := t.config.EmailFrom
+	username := t.config.EmailSMTPUsername
 	password := t.config.EmailPassword
 	to := t.config.EmailTo
 
-	if host == "" || port <= 0 || from == "" || to == "" {
+	if host == "" || port <= 0 || from == "" || to == "" || username == "" || password == "" {
 		return fmt.Errorf("invalid smtp configuration")
 	}
 
@@ -410,7 +440,13 @@ func (t *AlertTask) sendEmail(ctx context.Context, criticalEvents []SpoofResult)
                 <div class="field"><span class="field-label">Thương hiệu bị nhắm tới:</span> <strong>%s</strong></div>
                 <div class="field"><span class="field-label">Tên miền chính chủ:</span> <a href="https://%s" style="color: #ff334b; font-weight: bold;">%s</a></div>
                 <div class="field"><span class="field-label">Lý do phát hiện:</span> <span class="field-value">%s</span></div>
-            </div>`, e.Domain, e.Category, e.BrandName, e.OfficialDomain, e.OfficialDomain, e.Reason)
+            </div>`,
+			html.EscapeString(e.Domain),
+			html.EscapeString(e.Category),
+			html.EscapeString(e.BrandName),
+			html.EscapeString(e.OfficialDomain),
+			html.EscapeString(e.OfficialDomain),
+			html.EscapeString(e.Reason))
 	}
 
 	htmlBody.WriteString(`
@@ -427,15 +463,98 @@ func (t *AlertTask) sendEmail(ctx context.Context, criticalEvents []SpoofResult)
 	mime := "MIME-version: 1.0;\nContent-Type: text/html; charset=\"UTF-8\";\n\n"
 	msg := []byte(subject + mime + htmlBody.String())
 
-	auth := smtp.PlainAuth("", from, password, host)
+	auth := smtp.PlainAuth("", username, password, host)
 	addr := fmt.Sprintf("%s:%d", host, port)
 
-	err := smtp.SendMail(addr, auth, from, []string{to}, msg)
-	if err != nil {
+	if err := sendSMTP(ctx, addr, host, port, auth, from, []string{to}, msg); err != nil {
 		return fmt.Errorf("smtp send mail: %w", err)
 	}
 
 	return nil
+}
+
+func sendSMTP(ctx context.Context, addr, host string, port int, auth smtp.Auth, from string, to []string, msg []byte) error {
+	dialer := &net.Dialer{Timeout: 10 * time.Second}
+	if deadline, ok := ctx.Deadline(); ok {
+		dialer.Deadline = deadline
+	}
+
+	var (
+		conn net.Conn
+		err  error
+	)
+	if port == 465 {
+		rawConn, dialErr := dialer.DialContext(ctx, "tcp", addr)
+		if dialErr != nil {
+			return dialErr
+		}
+		tlsConn := tls.Client(rawConn, &tls.Config{ServerName: host, MinVersion: tls.VersionTLS12})
+		if err := setConnDeadline(ctx, tlsConn); err != nil {
+			_ = tlsConn.Close()
+			return err
+		}
+		if err := tlsConn.HandshakeContext(ctx); err != nil {
+			_ = tlsConn.Close()
+			return err
+		}
+		conn = tlsConn
+	} else if port == 587 {
+		conn, err = dialer.DialContext(ctx, "tcp", addr)
+		if err != nil {
+			return err
+		}
+	} else {
+		return fmt.Errorf("unsupported smtp port %d: use 465 implicit TLS or 587 STARTTLS", port)
+	}
+	defer conn.Close()
+	_ = setConnDeadline(ctx, conn)
+
+	client, err := smtp.NewClient(conn, host)
+	if err != nil {
+		return err
+	}
+	defer client.Close()
+
+	if port == 587 {
+		if ok, _ := client.Extension("STARTTLS"); !ok {
+			return errors.New("smtp server does not advertise STARTTLS")
+		}
+		if err := client.StartTLS(&tls.Config{ServerName: host, MinVersion: tls.VersionTLS12}); err != nil {
+			return err
+		}
+		_ = setConnDeadline(ctx, conn)
+	}
+
+	if err := client.Auth(auth); err != nil {
+		return err
+	}
+	if err := client.Mail(from); err != nil {
+		return err
+	}
+	for _, recipient := range to {
+		if err := client.Rcpt(recipient); err != nil {
+			return err
+		}
+	}
+	writer, err := client.Data()
+	if err != nil {
+		return err
+	}
+	if _, err := writer.Write(msg); err != nil {
+		_ = writer.Close()
+		return err
+	}
+	if err := writer.Close(); err != nil {
+		return err
+	}
+	return client.Quit()
+}
+
+func setConnDeadline(ctx context.Context, conn net.Conn) error {
+	if deadline, ok := ctx.Deadline(); ok {
+		return conn.SetDeadline(deadline)
+	}
+	return conn.SetDeadline(time.Now().Add(10 * time.Second))
 }
 
 func detectVietnamBrandSpoof(domain string) (SpoofResult, bool) {

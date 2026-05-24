@@ -8,6 +8,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -44,15 +45,37 @@ func TestOpenSourceHandlesGzipHTTP(t *testing.T) {
 	}
 }
 
+func TestOpenSourceLimitsDecompressedHTTPFeed(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Encoding", "gzip")
+		writer := gzip.NewWriter(w)
+		_, _ = writer.Write([]byte("one.test\ntwo.test\n"))
+		_ = writer.Close()
+	}))
+	defer server.Close()
+
+	reader, closeReader, err := OpenSourceWithin(context.Background(), server.URL, server.Client(), t.TempDir(), 8)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer closeReader()
+
+	_, err = Parse(reader)
+	if err == nil || !strings.Contains(err.Error(), "maximum size") {
+		t.Fatalf("expected max-size error, got %v", err)
+	}
+}
+
 func TestSyncDryRunWithGzipFile(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "feed.txt.gz")
 	writeGzipFile(t, path, "# comment\nbad.test\nbad.test\nhttps://evil.test/path\n")
 
 	report, err := Sync(context.Background(), SyncOptions{
-		Source:  path,
-		DryRun:  true,
-		Timeout: time.Second,
+		Source:   path,
+		FileRoot: dir,
+		DryRun:   true,
+		Timeout:  time.Second,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -87,6 +110,7 @@ func TestSyncWritesToRedis(t *testing.T) {
 
 	report, err := Sync(context.Background(), SyncOptions{
 		Source:        path,
+		FileRoot:      dir,
 		RedisAddr:     server.Addr(),
 		RedisPassword: "",
 		RedisDB:       0,
@@ -114,6 +138,92 @@ func TestSyncWritesToRedis(t *testing.T) {
 	}
 	if ok, err := redisCache.SetIsMember(context.Background(), DefaultThreatFeedKey, "evil.test"); err != nil || !ok {
 		t.Fatalf("expected evil.test in redis feed set, ok=%v err=%v", ok, err)
+	}
+	revision, err := redisCache.GetInt64(context.Background(), RevisionKey(DefaultThreatFeedKey))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if revision != 1 {
+		t.Fatalf("expected feed revision 1, got %d", revision)
+	}
+	var status SourceStatus
+	found, err := redisCache.GetJSON(context.Background(), StatusKey(DefaultThreatFeedKey, path), &status)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !found {
+		t.Fatal("expected source status metadata to be written")
+	}
+	if status.Status != "ok" {
+		t.Fatalf("expected source status ok, got %s", status.Status)
+	}
+	if status.LastSuccessAt == "" {
+		t.Fatal("expected last success timestamp")
+	}
+	if status.FeedRevision != 1 {
+		t.Fatalf("expected source revision 1, got %d", status.FeedRevision)
+	}
+}
+
+func TestParseOpenPhishCommunityFeed(t *testing.T) {
+	parsed, err := Parse(bytes.NewBufferString("https://a.example/login https://b.example/pay http://a.example/retry"))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if parsed.Stats.Valid != 2 {
+		t.Fatalf("expected 2 valid domains, got %d", parsed.Stats.Valid)
+	}
+	if parsed.Stats.Duplicates != 1 {
+		t.Fatalf("expected 1 duplicate domain, got %d", parsed.Stats.Duplicates)
+	}
+	if len(parsed.Domains) != 2 {
+		t.Fatalf("expected 2 normalized domains, got %d", len(parsed.Domains))
+	}
+}
+
+func TestReadStatusSummaryMarksStale(t *testing.T) {
+	server, err := miniredis.Run()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer server.Close()
+
+	redisCache := cache.NewRedis(server.Addr(), "", 0)
+	defer func() {
+		if err := redisCache.Close(); err != nil {
+			t.Fatal(err)
+		}
+	}()
+
+	source := "https://example.test/feed.txt"
+	status := SourceStatus{
+		Source:        source,
+		SourceID:      "abc123",
+		FeedKey:       DefaultThreatFeedKey,
+		Status:        "ok",
+		LastAttemptAt: time.Now().Add(-48 * time.Hour).UTC().Format(time.RFC3339Nano),
+		LastSuccessAt: time.Now().Add(-48 * time.Hour).UTC().Format(time.RFC3339Nano),
+	}
+	if err := redisCache.SetJSON(context.Background(), StatusKey(DefaultThreatFeedKey, source), status, 0); err != nil {
+		t.Fatal(err)
+	}
+	if err := redisCache.SetString(context.Background(), RevisionKey(DefaultThreatFeedKey), "3", 0); err != nil {
+		t.Fatal(err)
+	}
+
+	summary := ReadStatusSummary(context.Background(), redisCache, DefaultThreatFeedKey, ProductionFreePreset, []string{source}, 24*time.Hour)
+	if summary.Status != "stale" {
+		t.Fatalf("expected stale summary status, got %s", summary.Status)
+	}
+	if !summary.Stale {
+		t.Fatal("expected summary stale flag")
+	}
+	if summary.Revision != 3 {
+		t.Fatalf("expected revision 3, got %d", summary.Revision)
+	}
+	if len(summary.Sources) != 1 || !summary.Sources[0].Stale {
+		t.Fatalf("expected one stale source, got %#v", summary.Sources)
 	}
 }
 

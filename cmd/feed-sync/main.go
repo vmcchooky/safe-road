@@ -5,12 +5,14 @@ import (
 	"encoding/json"
 	"flag"
 	"fmt"
-	"log"
+	"os"
 	"strings"
 	"time"
 
 	"safe-road/internal/config"
+	"safe-road/internal/correlation"
 	"safe-road/internal/feed"
+	"safe-road/internal/logjson"
 )
 
 const defaultThreatFeedKey = "safe-road:threat:feed"
@@ -29,7 +31,7 @@ type syncReport struct {
 func main() {
 	source := flag.String("source", config.String("SAFE_ROAD_THREAT_FEED_SOURCE", ""), "local file path or HTTP(S) feed URL")
 	redisAddr := flag.String("redis-addr", config.String("SAFE_ROAD_REDIS_ADDR", ""), "Redis address")
-	redisPassword := flag.String("redis-password", config.String("SAFE_ROAD_REDIS_PASSWORD", ""), "Redis password")
+	redisPassword := flag.String("redis-password", config.SecretString("SAFE_ROAD_REDIS_PASSWORD", ""), "Redis password")
 	redisDB := flag.Int("redis-db", config.Int("SAFE_ROAD_REDIS_DB", 0), "Redis database")
 	key := flag.String("key", config.String("SAFE_ROAD_THREAT_FEED_KEY", feed.DefaultThreatFeedKey), "Redis Set key for threat feed")
 	dryRun := flag.Bool("dry-run", false, "parse feed and report counts without writing Redis")
@@ -38,26 +40,53 @@ func main() {
 	flag.Parse()
 
 	if strings.TrimSpace(*source) == "" {
-		log.Fatal("feed source is required through -source or SAFE_ROAD_THREAT_FEED_SOURCE")
+		logjson.Error("feed source is required", map[string]any{
+			"service": "feed-sync",
+			"source":  strings.TrimSpace(*source),
+		})
+		os.Exit(1)
 	}
 
-	report, err := feed.Sync(context.Background(), feed.SyncOptions{
-		Source:        *source,
-		RedisAddr:     *redisAddr,
-		RedisPassword: *redisPassword,
-		RedisDB:       *redisDB,
-		Key:           *key,
-		DryRun:        *dryRun,
-		Replace:       *replace,
-		Timeout:       *timeout,
+	ctx := correlation.WithRunID(context.Background(), correlation.NewID("feed-sync"))
+	report, err := feed.Sync(ctx, feed.SyncOptions{
+		Source:                     *source,
+		FileRoot:                   config.FeedFileRoot(),
+		MaxBytes:                   int64(config.Int("SAFE_ROAD_FEED_MAX_BYTES", int(feed.DefaultMaxFeedBytes))),
+		RedisAddr:                  *redisAddr,
+		RedisPassword:              *redisPassword,
+		RedisDB:                    *redisDB,
+		Key:                        *key,
+		DryRun:                     *dryRun,
+		Replace:                    *replace,
+		Timeout:                    *timeout,
+		ParserDriftInvalidRatio:    config.Float64("SAFE_ROAD_FEED_DRIFT_INVALID_RATIO", 0.20),
+		ParserDriftMinInvalid:      config.Int("SAFE_ROAD_FEED_DRIFT_MIN_INVALID", 25),
+		CacheInvalidationMinWrites: int64(config.Int("SAFE_ROAD_FEED_CACHE_INVALIDATION_MIN_WRITES", 1)),
 	})
 	if err != nil {
-		log.Fatal(err)
+		logjson.Error("feed sync failed", correlation.Fields(ctx, map[string]any{
+			"service": "feed-sync",
+			"source":  *source,
+			"error":   err.Error(),
+		}))
+		os.Exit(1)
 	}
 
 	encoded, err := json.MarshalIndent(report, "", "  ")
 	if err != nil {
-		log.Fatal(err)
+		logjson.Error("feed sync report encode failed", correlation.Fields(ctx, map[string]any{
+			"service": "feed-sync",
+			"error":   err.Error(),
+		}))
+		os.Exit(1)
 	}
+
+	logjson.Info("feed sync completed", correlation.Fields(ctx, map[string]any{
+		"service": "feed-sync",
+		"source":  *source,
+		"written": report.Written,
+		"valid":   report.Stats.Valid,
+		"invalid": report.Stats.Invalid,
+	}))
 	fmt.Println(string(encoded))
 }

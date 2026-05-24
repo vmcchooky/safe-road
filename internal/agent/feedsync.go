@@ -4,22 +4,28 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"log"
 	"strings"
 	"time"
 
+	"safe-road/internal/correlation"
 	"safe-road/internal/feed"
+	"safe-road/internal/logjson"
 	"safe-road/internal/store"
 )
 
 // FeedSyncConfig holds configuration for the multi-source feed sync task.
 type FeedSyncConfig struct {
-	Sources       []string // Feed URLs (comma-separated in env)
-	RedisAddr     string
-	RedisPassword string
-	RedisDB       int
-	FeedKey       string
-	Timeout       time.Duration
+	Sources                    []string // Feed URLs (comma-separated in env)
+	FileRoot                   string
+	MaxBytes                   int64
+	RedisAddr                  string
+	RedisPassword              string
+	RedisDB                    int
+	FeedKey                    string
+	Timeout                    time.Duration
+	ParserDriftInvalidRatio    float64
+	ParserDriftMinInvalid      int
+	CacheInvalidationMinWrites int64
 }
 
 // FeedSyncTask downloads threat feed data from multiple sources and adds
@@ -36,6 +42,12 @@ func NewFeedSyncTask(db *store.DB, cfg FeedSyncConfig) *FeedSyncTask {
 	}
 	if cfg.Timeout <= 0 {
 		cfg.Timeout = 30 * time.Second
+	}
+	if cfg.FileRoot == "" {
+		cfg.FileRoot = "./data"
+	}
+	if cfg.MaxBytes <= 0 {
+		cfg.MaxBytes = feed.DefaultMaxFeedBytes
 	}
 	return &FeedSyncTask{
 		store:  db,
@@ -72,17 +84,27 @@ func (t *FeedSyncTask) Run(ctx context.Context) error {
 		}
 
 		report, err := feed.Sync(ctx, feed.SyncOptions{
-			Source:        source,
-			RedisAddr:     t.config.RedisAddr,
-			RedisPassword: t.config.RedisPassword,
-			RedisDB:       t.config.RedisDB,
-			Key:           t.config.FeedKey,
-			DryRun:        false,
-			Replace:       false, // additive mode — don't delete existing entries
-			Timeout:       t.config.Timeout,
+			Source:                     source,
+			FileRoot:                   t.config.FileRoot,
+			MaxBytes:                   t.config.MaxBytes,
+			RedisAddr:                  t.config.RedisAddr,
+			RedisPassword:              t.config.RedisPassword,
+			RedisDB:                    t.config.RedisDB,
+			Key:                        t.config.FeedKey,
+			DryRun:                     false,
+			Replace:                    false, // additive mode — don't delete existing entries
+			Timeout:                    t.config.Timeout,
+			ParserDriftInvalidRatio:    t.config.ParserDriftInvalidRatio,
+			ParserDriftMinInvalid:      t.config.ParserDriftMinInvalid,
+			CacheInvalidationMinWrites: t.config.CacheInvalidationMinWrites,
 		})
 		if err != nil {
-			log.Printf("agent feedsync error for %s: %v", source, err)
+			logjson.Error("agent feed sync failed", correlation.Fields(ctx, map[string]any{
+				"service": "core-api",
+				"task":    "feedsync",
+				"source":  source,
+				"error":   err.Error(),
+			}))
 			sourcesFailed++
 
 			if t.store != nil && t.store.Enabled() {
@@ -98,10 +120,28 @@ func (t *FeedSyncTask) Run(ctx context.Context) error {
 		if t.store != nil && t.store.Enabled() {
 			detailsJSON, _ := json.Marshal(report)
 			_ = t.store.RecordAgentEvent("feedsync", "feed_synced", "", string(detailsJSON))
+			if report.ParserDrift {
+				_ = t.store.RecordAgentEvent("feedsync", "feed_parser_drift", "", string(detailsJSON))
+			}
 		}
 
-		log.Printf("agent feedsync completed for %s: %d written, %d valid, %d invalid",
-			source, report.Written, report.Stats.Valid, report.Stats.Invalid)
+		logjson.Info("agent feed sync completed", correlation.Fields(ctx, map[string]any{
+			"service":     "core-api",
+			"task":        "feedsync",
+			"source":      source,
+			"written":     report.Written,
+			"valid":       report.Stats.Valid,
+			"invalid":     report.Stats.Invalid,
+			"request_key": report.Key,
+		}))
+		if report.ParserDrift {
+			logjson.Warn("agent feed parser drift", correlation.Fields(ctx, map[string]any{
+				"service": "core-api",
+				"task":    "feedsync",
+				"source":  source,
+				"reason":  report.ParserDriftReason,
+			}))
+		}
 	}
 
 	summary := fmt.Sprintf(`{"sources_ok":%d,"sources_failed":%d,"total_written":%d}`,
@@ -110,8 +150,13 @@ func (t *FeedSyncTask) Run(ctx context.Context) error {
 		_ = t.store.RecordAgentEvent("feedsync", "feedsync_completed", "", summary)
 	}
 
-	log.Printf("agent feedsync cycle done: %d ok, %d failed, %d domains written",
-		sourcesOK, sourcesFailed, totalWritten)
+	logjson.Info("agent feed sync cycle done", correlation.Fields(ctx, map[string]any{
+		"service":        "core-api",
+		"task":           "feedsync",
+		"sources_ok":     sourcesOK,
+		"sources_failed": sourcesFailed,
+		"total_written":  totalWritten,
+	}))
 
 	if sourcesFailed > 0 && sourcesOK == 0 {
 		return fmt.Errorf("all %d feed sources failed", sourcesFailed)

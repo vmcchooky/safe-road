@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"crypto/tls"
 	"encoding/json"
 	"fmt"
@@ -18,6 +19,7 @@ import (
 	"safe-road/internal/observability"
 	"safe-road/internal/ratelimit"
 	"safe-road/internal/risk"
+	"safe-road/internal/serve"
 	"safe-road/internal/store"
 )
 
@@ -109,7 +111,7 @@ func TestMetricsHandlerRoot(t *testing.T) {
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("/metrics", app.metricsHandler)
-	testServer := httptest.NewServer(logRequests(mux, app.metrics))
+	testServer := httptest.NewServer(serve.WithRequestID(logRequests("dns-resolver", mux, app.metrics)))
 	defer testServer.Close()
 
 	response, err := http.Get(testServer.URL + "/metrics")
@@ -120,6 +122,9 @@ func TestMetricsHandlerRoot(t *testing.T) {
 
 	if response.StatusCode != http.StatusOK {
 		t.Fatalf("expected 200, got %d", response.StatusCode)
+	}
+	if response.Header.Get("X-Request-ID") == "" {
+		t.Fatal("expected X-Request-ID response header")
 	}
 
 	var payload map[string]any
@@ -135,6 +140,52 @@ func TestMetricsHandlerRoot(t *testing.T) {
 	}
 	if _, ok := metrics["request_summary"].(map[string]any); !ok {
 		t.Fatalf("expected request_summary map, got %#v", metrics["request_summary"])
+	}
+}
+
+func TestDoHUpstreamFailureCounter(t *testing.T) {
+	mockUpstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, "upstream unavailable", http.StatusBadGateway)
+	}))
+	defer mockUpstream.Close()
+
+	app := &app{
+		risk: risk.NewService(risk.Options{
+			AnalysisConfig: config.DefaultAnalysisConfig(),
+			RedisTimeout:   10 * time.Millisecond,
+		}),
+		metrics:        observability.NewRegistry(),
+		deploymentTier: "budget-vps",
+		upstreamDoHURL: mockUpstream.URL,
+		upstreamClient: mockUpstream.Client(),
+		blockPageIP:    "127.0.0.1",
+		dnsTTL:         60,
+	}
+	defer func() {
+		if err := app.risk.Close(); err != nil {
+			t.Fatal(err)
+		}
+	}()
+
+	msg := new(dns.Msg)
+	msg.SetQuestion(dns.Fqdn("example.com"), dns.TypeA)
+	wire, err := msg.Pack()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	recorder := httptest.NewRecorder()
+	request := httptest.NewRequest(http.MethodPost, "/dns-query", bytes.NewReader(wire))
+	request.Header.Set("Content-Type", "application/dns-message")
+
+	app.dohHandler(recorder, request)
+
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("expected 200 even on DNS SERVFAIL response, got %d", recorder.Code)
+	}
+
+	if got := app.metrics.Snapshot().Counters["upstream_doh_failures_total"]; got != 1 {
+		t.Fatalf("expected upstream_doh_failures_total=1, got %d", got)
 	}
 }
 
@@ -261,13 +312,13 @@ func TestDoTHandlerBasic(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	
+
 	// Create threat override for adult content / block
 	_, err = storeDB.CreateGroup("malicious-blocker", "Blocks malicious sites", []string{"malicious"}, false, false)
 	if err != nil {
 		t.Fatal(err)
 	}
-	
+
 	// Add mock override for a bad domain
 	err = storeDB.UpsertOverride("bocongan-verify.xyz", "block", "Mock malicious site")
 	if err != nil {
@@ -311,7 +362,7 @@ func TestDoTHandlerBasic(t *testing.T) {
 		Net:      "tcp-tls",
 		Handler:  dns.HandlerFunc(app.dotHandler),
 	}
-	
+
 	go func() {
 		_ = dotServer.ActivateAndServe()
 	}()
@@ -333,7 +384,7 @@ func TestDoTHandlerBasic(t *testing.T) {
 	t.Run("Allow Query - Forward to Upstream", func(t *testing.T) {
 		m := new(dns.Msg)
 		m.SetQuestion(dns.Fqdn("example.com"), dns.TypeA)
-		
+
 		r, _, err := client.Exchange(m, serverAddr)
 		if err != nil {
 			t.Fatalf("DoT exchange failed: %v", err)
@@ -356,7 +407,7 @@ func TestDoTHandlerBasic(t *testing.T) {
 	t.Run("Block Query - Return Block Page IP", func(t *testing.T) {
 		m := new(dns.Msg)
 		m.SetQuestion(dns.Fqdn("bocongan-verify.xyz"), dns.TypeA)
-		
+
 		r, _, err := client.Exchange(m, serverAddr)
 		if err != nil {
 			t.Fatalf("DoT exchange failed: %v", err)
@@ -412,9 +463,9 @@ func TestDoTHandlerRateLimiter(t *testing.T) {
 	defer func() { _ = dotServer.Shutdown() }()
 
 	client := &dns.Client{
-		Net: "tcp-tls",
+		Net:       "tcp-tls",
 		TLSConfig: &tls.Config{InsecureSkipVerify: true},
-		Timeout: 2 * time.Second,
+		Timeout:   2 * time.Second,
 	}
 
 	m := new(dns.Msg)
@@ -493,9 +544,9 @@ func TestDoTHandlerConcurrent(t *testing.T) {
 		go func(id int) {
 			defer wg.Done()
 			client := &dns.Client{
-				Net: "tcp-tls",
+				Net:       "tcp-tls",
 				TLSConfig: &tls.Config{InsecureSkipVerify: true},
-				Timeout: 2 * time.Second,
+				Timeout:   2 * time.Second,
 			}
 			m := new(dns.Msg)
 			m.SetQuestion(dns.Fqdn(fmt.Sprintf("domain-%d.com", id)), dns.TypeA)
@@ -540,9 +591,9 @@ func TestDoTHandlerPanicRecovery(t *testing.T) {
 	defer func() { _ = dotServer.Shutdown() }()
 
 	client := &dns.Client{
-		Net: "tcp-tls",
+		Net:       "tcp-tls",
 		TLSConfig: &tls.Config{InsecureSkipVerify: true},
-		Timeout: 2 * time.Second,
+		Timeout:   2 * time.Second,
 	}
 
 	m := new(dns.Msg)
@@ -589,7 +640,7 @@ func TestDoTHandlerIPv6Sanitization(t *testing.T) {
 
 	// Tạo một mock ResponseWriter với IP IPv6 dạng [::1] (hoặc địa chỉ có dấu ngoặc)
 	mockWriter := &mockDNSWriter{remoteAddr: &mockAddr{net: "tcp", addr: "[::1]:12345"}}
-	
+
 	m := new(dns.Msg)
 	m.SetQuestion(dns.Fqdn("example.com"), dns.TypeA)
 
@@ -609,17 +660,17 @@ type mockDNSWriter struct {
 	writtenMsg *dns.Msg
 }
 
-func (m *mockDNSWriter) LocalAddr() net.Addr { return nil }
+func (m *mockDNSWriter) LocalAddr() net.Addr  { return nil }
 func (m *mockDNSWriter) RemoteAddr() net.Addr { return m.remoteAddr }
 func (m *mockDNSWriter) WriteMsg(msg *dns.Msg) error {
 	m.writtenMsg = msg
 	return nil
 }
 func (m *mockDNSWriter) Write(p []byte) (int, error) { return 0, nil }
-func (m *mockDNSWriter) Close() error { return nil }
-func (m *mockDNSWriter) TsigStatus() error { return nil }
-func (m *mockDNSWriter) TsigTimersOnly(bool) {}
-func (m *mockDNSWriter) Hijack() {}
+func (m *mockDNSWriter) Close() error                { return nil }
+func (m *mockDNSWriter) TsigStatus() error           { return nil }
+func (m *mockDNSWriter) TsigTimersOnly(bool)         {}
+func (m *mockDNSWriter) Hijack()                     {}
 
 type mockAddr struct {
 	net  string
@@ -628,4 +679,3 @@ type mockAddr struct {
 
 func (a *mockAddr) Network() string { return a.net }
 func (a *mockAddr) String() string  { return a.addr }
-

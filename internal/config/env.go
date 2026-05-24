@@ -1,9 +1,13 @@
 package config
 
 import (
+	"fmt"
 	"os"
 	"strconv"
+	"strings"
 	"time"
+
+	"safe-road/internal/safefile"
 )
 
 func String(key, fallback string) string {
@@ -81,4 +85,60 @@ func Float64(key string, fallback float64) float64 {
 		return fallback
 	}
 	return parsed
+}
+
+func Environment() string {
+	value := strings.ToLower(strings.TrimSpace(os.Getenv("SAFE_ROAD_ENV")))
+	if value == "" {
+		return "local"
+	}
+	return value
+}
+
+func SecretFileRoot() string {
+	return String("SAFE_ROAD_SECRET_FILE_ROOT", "./ops/secrets")
+}
+
+func FeedFileRoot() string {
+	return String("SAFE_ROAD_FEED_FILE_ROOT", "./data")
+}
+
+func ConfigFileRoot() string {
+	return String("SAFE_ROAD_CONFIG_FILE_ROOT", "./data")
+}
+
+func IsProduction() bool {
+	switch Environment() {
+	case "production", "prod":
+		return true
+	default:
+		return false
+	}
+}
+
+func SecretString(key, fallback string) string {
+	value, err := SecretStringE(key)
+	if err != nil || value == "" {
+		return fallback
+	}
+	return value
+}
+
+func SecretStringE(key string) (string, error) {
+	if value := os.Getenv(key); value != "" {
+		return value, nil
+	}
+
+	fileKey := key + "_FILE"
+	filePath := strings.TrimSpace(os.Getenv(fileKey))
+	if filePath == "" {
+		return "", nil
+	}
+
+	data, err := safefile.ReadFileWithin(SecretFileRoot(), filePath)
+	if err != nil {
+		return "", fmt.Errorf("read %s from %s: %w", fileKey, filePath, err)
+	}
+
+	return strings.TrimSpace(string(data)), nil
 }

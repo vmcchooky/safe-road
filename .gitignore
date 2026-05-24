@@ -7,3 +7,6 @@ tmp/
 *.out
 *.log
 .DS_Store
+ops/certs/dot/*.pem
+ops/secrets/*
+!ops/secrets/README.md

@@ -1,8 +1,11 @@
 package feed
 
 import (
+	"bufio"
+	"bytes"
 	"encoding/csv"
 	"errors"
+	"fmt"
 	"io"
 	"net/url"
 	"strings"
@@ -23,64 +26,143 @@ type ParseResult struct {
 }
 
 func Parse(r io.Reader) (ParseResult, error) {
-	data, err := io.ReadAll(r)
+	var result ParseResult
+	err := ParseEach(r, func(domain string) error {
+		result.Domains = append(result.Domains, domain)
+		return nil
+	}, &result.Stats)
 	if err != nil {
 		return ParseResult{}, err
 	}
-
-	if isProbablyCSV(string(data)) {
-		csvRows, csvErr := csv.NewReader(strings.NewReader(string(data))).ReadAll()
-		if csvErr == nil {
-			return parseCSVRows(csvRows), nil
-		}
-	}
-
-	return parseLines(strings.Split(string(data), "\n")), nil
+	return result, nil
 }
 
-func parseCSVRows(rows [][]string) ParseResult {
-	seen := map[string]struct{}{}
-	result := ParseResult{}
+func ParseEach(r io.Reader, onDomain func(domain string) error, stats *ParseStats) error {
+	if onDomain == nil {
+		return errors.New("domain handler is required")
+	}
+	if stats == nil {
+		stats = &ParseStats{}
+	}
 
-	for _, row := range rows {
-		if len(row) == 0 {
-			result.Stats.Skipped++
-			continue
+	seen := map[string]struct{}{}
+	reader, isCSV, err := detectFormat(r)
+	if err != nil {
+		return err
+	}
+	if isCSV {
+		return parseCSVStream(reader, seen, stats, onDomain)
+	}
+	return parseTextStream(reader, seen, stats, onDomain)
+}
+
+func parseCSVStream(r io.Reader, seen map[string]struct{}, stats *ParseStats, onDomain func(string) error) error {
+	reader := csv.NewReader(r)
+	for {
+		row, err := reader.Read()
+		if errors.Is(err, io.EOF) {
+			return nil
+		}
+		if err != nil {
+			return err
 		}
 
 		domain, ok := firstDomain(row)
 		if !ok {
-			result.Stats.Invalid++
+			stats.Invalid++
 			continue
 		}
 
-		addDomain(&result, seen, domain)
+		if err := addDomain(stats, seen, domain, onDomain); err != nil {
+			return err
+		}
 	}
-
-	return result
 }
 
-func parseLines(lines []string) ParseResult {
-	seen := map[string]struct{}{}
-	result := ParseResult{}
-
-	for _, line := range lines {
-		line = stripComment(strings.TrimSpace(line))
-		if line == "" {
-			result.Stats.Skipped++
-			continue
+func parseTextStream(r io.Reader, seen map[string]struct{}, stats *ParseStats, onDomain func(string) error) error {
+	scanner := bufio.NewScanner(r)
+	scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024)
+	for scanner.Scan() {
+		if err := parseTextLine(scanner.Text(), seen, stats, onDomain); err != nil {
+			return err
 		}
-
-		domain, err := normalizeCandidate(line)
-		if err != nil {
-			result.Stats.Invalid++
-			continue
+	}
+	if err := scanner.Err(); err != nil {
+		if errors.Is(err, bufio.ErrTooLong) {
+			return fmt.Errorf("feed line exceeds 1048576 bytes: %w", err)
 		}
+		return err
+	}
+	return nil
+}
 
-		addDomain(&result, seen, domain)
+func parseTextLine(line string, seen map[string]struct{}, stats *ParseStats, onDomain func(string) error) error {
+	line = strings.TrimSpace(line)
+	if line == "" || strings.HasPrefix(line, "#") {
+		stats.Skipped++
+		return nil
 	}
 
-	return result
+	parsedAny := false
+	lineHadValid := false
+	lineInvalid := 0
+	for _, field := range strings.Fields(line) {
+		if strings.HasPrefix(field, "#") {
+			break
+		}
+		field = stripComment(strings.TrimSpace(field))
+		if field == "" {
+			continue
+		}
+		parsedAny = true
+
+		domain, err := normalizeCandidate(field)
+		if err != nil {
+			lineInvalid++
+			continue
+		}
+
+		lineHadValid = true
+		if err := addDomain(stats, seen, domain, onDomain); err != nil {
+			return err
+		}
+	}
+	if !parsedAny {
+		stats.Skipped++
+		return nil
+	}
+	if lineHadValid {
+		stats.Invalid += lineInvalid
+		return nil
+	}
+	if lineInvalid > 0 {
+		stats.Invalid++
+	}
+	return nil
+}
+
+func detectFormat(r io.Reader) (io.Reader, bool, error) {
+	buffered := bufio.NewReader(r)
+	var prefix bytes.Buffer
+	for {
+		line, err := buffered.ReadString('\n')
+		if line != "" {
+			_, _ = prefix.WriteString(line)
+			trimmed := strings.TrimSpace(line)
+			if trimmed != "" && !strings.HasPrefix(trimmed, "#") {
+				return io.MultiReader(bytes.NewReader(prefix.Bytes()), buffered), strings.Contains(trimmed, ","), nil
+			}
+		}
+		if errors.Is(err, io.EOF) {
+			return bytes.NewReader(prefix.Bytes()), false, nil
+		}
+		if err != nil {
+			return nil, false, err
+		}
+		if prefix.Len() > 1024*1024 {
+			return nil, false, errors.New("feed line exceeds 1048576 bytes")
+		}
+	}
 }
 
 func firstDomain(fields []string) (string, bool) {
@@ -99,15 +181,15 @@ func firstDomain(fields []string) (string, bool) {
 	return "", false
 }
 
-func addDomain(result *ParseResult, seen map[string]struct{}, domain string) {
+func addDomain(stats *ParseStats, seen map[string]struct{}, domain string, onDomain func(string) error) error {
 	if _, exists := seen[domain]; exists {
-		result.Stats.Duplicates++
-		return
+		stats.Duplicates++
+		return nil
 	}
 
 	seen[domain] = struct{}{}
-	result.Domains = append(result.Domains, domain)
-	result.Stats.Valid++
+	stats.Valid++
+	return onDomain(domain)
 }
 
 func stripComment(value string) string {

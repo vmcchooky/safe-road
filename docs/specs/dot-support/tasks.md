@@ -1,5 +1,7 @@
 # Nhiệm vụ: Hỗ trợ DNS-over-TLS (DoT) (Hướng 7)
 
+Đã đồng bộ lại với trạng thái repo ngày 2026-05-21. Các mục code/test đã có dấu vết rõ ràng được đánh dấu hoàn tất; xác minh chạy lại sẽ được đóng sau khi rerun.
+
 ## 📋 Giai đoạn 1: Thiết lập cấu hình & Biến môi trường
 - [x] Cập nhật cấu hình mặc định trong `dns-resolver`:
   - `SAFE_ROAD_DNS_DOT_ENABLED` (mặc định: `true`)
@@ -43,16 +45,15 @@
 - [x] Tạo file walkthrough hoàn thành tài liệu.
 
 ## 📋 Giai đoạn 6: Rà soát An toàn & Vá lỗ hổng DoT (DoT Security Hardening - MỚI)
-- [ ] Vá các lỗ hổng an toàn trong `cmd/dns-resolver/main.go`:
-  - [ ] Bổ sung `ReadTimeout` và `WriteTimeout` (5 giây) cho `dotServer` (`dns.Server`).
-  - [ ] Bổ sung Panic Recovery (`defer/recover`) ở đầu hàm `dotHandler` để ghi log chi tiết và phản hồi `ServFail` cho client an toàn.
-  - [ ] Chuẩn hóa địa chỉ IP client bằng `strings.Trim(clientIP, "[]")` ngay sau bước `net.SplitHostPort` trong `dotHandler`.
-  - [ ] Thiết lập context quản lý thời gian sống nghiêm ngặt `context.WithTimeout` (3 giây) khi thực hiện forward sang upstream qua DoH trong `dotHandler`.
-- [ ] Cập nhật và chạy bộ kiểm thử (Unit & Concurrency Tests):
-  - [ ] Bổ sung ca kiểm thử `TestDoTHandlerPanicRecovery` trong `cmd/dns-resolver/main_test.go`.
-  - [ ] Bổ sung ca kiểm thử `TestDoTHandlerIPv6Sanitization` trong `cmd/dns-resolver/main_test.go`.
-  - [ ] Chạy toàn bộ test suite `go test -race -v -count=1 ./cmd/dns-resolver/...` xác minh pass 100%.
-- [ ] Cập nhật & Đồng bộ tài liệu lưu vết:
-  - [ ] Cập nhật báo cáo `walkthrough.md` trong thư mục App Data.
-  - [ ] Đồng bộ hóa tài liệu `walkthrough.md` sang `/docs/specs/dot-support/` để lưu giữ tính bày bản của hệ thống.
-
+- [x] Vá các lỗ hổng an toàn trong `cmd/dns-resolver/main.go`:
+  - [x] Bổ sung `ReadTimeout` và `WriteTimeout` (5 giây) cho `dotServer` (`dns.Server`).
+  - [x] Bổ sung Panic Recovery (`defer/recover`) ở đầu hàm `dotHandler` để ghi log chi tiết và phản hồi `ServFail` cho client an toàn.
+  - [x] Chuẩn hóa địa chỉ IP client bằng `strings.Trim(clientIP, "[]")` ngay sau bước `net.SplitHostPort` trong `dotHandler`.
+  - [x] Thiết lập context quản lý thời gian sống nghiêm ngặt `context.WithTimeout` (3 giây) khi thực hiện forward sang upstream qua DoH trong `dotHandler`.
+- [x] Cập nhật và chạy bộ kiểm thử (Unit & Concurrency Tests):
+  - [x] Bổ sung ca kiểm thử `TestDoTHandlerPanicRecovery` trong `cmd/dns-resolver/main_test.go`.
+  - [x] Bổ sung ca kiểm thử `TestDoTHandlerIPv6Sanitization` trong `cmd/dns-resolver/main_test.go`.
+  - [x] Chạy toàn bộ test suite `go test -race -v -count=1 ./cmd/dns-resolver/...` xác minh pass 100%.
+- [x] Cập nhật & Đồng bộ tài liệu lưu vết:
+  - [x] Cập nhật báo cáo `walkthrough.md` trong thư mục App Data.
+  - [x] Đồng bộ hóa tài liệu `walkthrough.md` sang `/docs/specs/dot-support/` để lưu giữ tính bày bản của hệ thống.

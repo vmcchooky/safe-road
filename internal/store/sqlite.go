@@ -4,13 +4,14 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
-	"log"
 	"net"
 	"strings"
 	"sync"
 	"time"
 
 	_ "modernc.org/sqlite"
+
+	"safe-road/internal/logjson"
 )
 
 // TelemetryEntry represents a single domain analysis record.
@@ -270,7 +271,11 @@ func New(path string, retentionDays int) (*DB, error) {
 	go d.telemetryWriter()
 	go d.cleanupLoop()
 
-	log.Printf("sqlite store opened at %s (retention: %d days)", path, retentionDays)
+	logjson.Info("sqlite store opened", map[string]any{
+		"service":        "store",
+		"path":           path,
+		"retention_days": retentionDays,
+	})
 	return d, nil
 }
 
@@ -338,7 +343,10 @@ func (d *DB) writeEntry(entry TelemetryEntry) {
 		entry.ClientIP, entry.ClientID,
 	)
 	if err != nil {
-		log.Printf("telemetry write failed: %v", err)
+		logjson.Error("telemetry write failed", map[string]any{
+			"service": "store",
+			"error":   err.Error(),
+		})
 	}
 }
 
@@ -421,11 +429,19 @@ func (d *DB) cleanup() {
 	cutoff := time.Now().AddDate(0, 0, -d.retentionDays).UTC().Format(time.RFC3339)
 	result, err := d.db.Exec(`DELETE FROM analysis_log WHERE analyzed_at < ?`, cutoff)
 	if err != nil {
-		log.Printf("telemetry cleanup failed: %v", err)
+		logjson.Error("telemetry cleanup failed", map[string]any{
+			"service": "store",
+			"cutoff":  cutoff,
+			"error":   err.Error(),
+		})
 		return
 	}
 	if n, _ := result.RowsAffected(); n > 0 {
-		log.Printf("telemetry cleanup: removed %d old entries", n)
+		logjson.Info("telemetry cleanup removed old entries", map[string]any{
+			"service": "store",
+			"cutoff":  cutoff,
+			"removed": n,
+		})
 	}
 }
 
@@ -735,7 +751,10 @@ func (d *DB) CreateDefaultGroups() error {
 		if err != nil {
 			return fmt.Errorf("insert default group: %w", err)
 		}
-		log.Printf("sqlite store: initialized 'default' policy group")
+		logjson.Info("sqlite store initialized default policy group", map[string]any{
+			"service": "store",
+			"group":   "default",
+		})
 		return nil
 	}
 	return err
@@ -1199,5 +1218,3 @@ func (d *DB) GetEffectiveOverride(groupID int64, domain string) (*Override, erro
 
 	return nil, nil
 }
-
-

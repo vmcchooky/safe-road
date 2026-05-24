@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"log"
 	"math"
 	"strings"
 	"sync"
@@ -15,6 +14,9 @@ import (
 	"safe-road/internal/analysis"
 	"safe-road/internal/cache"
 	"safe-road/internal/config"
+	"safe-road/internal/correlation"
+	"safe-road/internal/feed"
+	"safe-road/internal/logjson"
 	"safe-road/internal/store"
 	"safe-road/internal/tlsinspect"
 	"safe-road/internal/whois"
@@ -49,19 +51,20 @@ type Options struct {
 }
 
 type Service struct {
-	redis         *cache.Redis
-	redisTimeout  time.Duration
-	ttlAllowed    time.Duration
-	ttlSuspicious time.Duration
-	ttlBlocked    time.Duration
-	recentLimit   int64
-	threatFeedKey string
-	ai            *ai.Client
-	whitelist     *Whitelist
-	analyzer      *analysis.Analyzer
-	store         *store.DB
-	enrichEnabled bool
-	enrichTimeout time.Duration
+	redis           *cache.Redis
+	redisTimeout    time.Duration
+	ttlAllowed      time.Duration
+	ttlSuspicious   time.Duration
+	ttlBlocked      time.Duration
+	recentLimit     int64
+	threatFeedKey   string
+	feedRevisionKey string
+	ai              *ai.Client
+	whitelist       *Whitelist
+	analyzer        *analysis.Analyzer
+	store           *store.DB
+	enrichEnabled   bool
+	enrichTimeout   time.Duration
 }
 
 type ClientInfo struct {
@@ -86,6 +89,11 @@ type CacheStatus struct {
 	Configured bool   `json:"configured"`
 	Status     string `json:"status"`
 	Error      string `json:"error,omitempty"`
+}
+
+type analysisCacheEntry struct {
+	Result       analysis.Result `json:"result"`
+	FeedRevision string          `json:"feed_revision,omitempty"`
 }
 
 func NewService(options Options) *Service {
@@ -119,19 +127,20 @@ func NewService(options Options) *Service {
 	}
 
 	return &Service{
-		redis:         options.Redis,
-		redisTimeout:  options.RedisTimeout,
-		ttlAllowed:    options.TTLAllowed,
-		ttlSuspicious: options.TTLSuspicious,
-		ttlBlocked:    options.TTLBlocked,
-		recentLimit:   recentLimit,
-		threatFeedKey: threatFeedKey,
-		ai:            aiClient,
-		whitelist:     wl,
-		analyzer:      analysis.NewAnalyzer(options.AnalysisConfig),
-		store:         options.Store,
-		enrichEnabled: options.EnrichEnabled,
-		enrichTimeout: options.EnrichTimeout,
+		redis:           options.Redis,
+		redisTimeout:    options.RedisTimeout,
+		ttlAllowed:      options.TTLAllowed,
+		ttlSuspicious:   options.TTLSuspicious,
+		ttlBlocked:      options.TTLBlocked,
+		recentLimit:     recentLimit,
+		threatFeedKey:   threatFeedKey,
+		feedRevisionKey: feed.RevisionKey(threatFeedKey),
+		ai:              aiClient,
+		whitelist:       wl,
+		analyzer:        analysis.NewAnalyzer(options.AnalysisConfig),
+		store:           options.Store,
+		enrichEnabled:   options.EnrichEnabled,
+		enrichTimeout:   options.EnrichTimeout,
 	}
 }
 
@@ -365,7 +374,10 @@ func (s *Service) RecordRecent(ctx context.Context, item Analysis) {
 		return s.redis.PushJSON(redisCtx, recentAnalysisKey, item, s.recentLimit)
 	})
 	if err != nil && !errors.Is(err, cache.ErrDisabled) {
-		log.Printf("recent analysis cache write failed: %v", err)
+		logjson.Warn("recent analysis cache write failed", correlation.Fields(ctx, map[string]any{
+			"service": "risk",
+			"error":   err.Error(),
+		}))
 	}
 }
 
@@ -382,7 +394,10 @@ func (s *Service) Recent(ctx context.Context) []Analysis {
 		})
 	})
 	if err != nil && !errors.Is(err, cache.ErrDisabled) {
-		log.Printf("recent analysis cache read failed: %v", err)
+		logjson.Warn("recent analysis cache read failed", correlation.Fields(ctx, map[string]any{
+			"service": "risk",
+			"error":   err.Error(),
+		}))
 	}
 
 	return recent
@@ -421,11 +436,26 @@ func (s *Service) analyze(ctx context.Context, domain string) (analysis.Result, 
 
 	// 1. Check Cache
 	cacheKey := fmt.Sprintf("safe-road:analysis:%s", normalized)
+	currentRevision := s.currentFeedRevision(ctx)
 	var cached analysis.Result
 	err = s.withRedis(ctx, func(redisCtx context.Context) error {
-		found, err := s.redis.GetJSON(redisCtx, cacheKey, &cached)
+		var entry analysisCacheEntry
+		found, err := s.redis.GetJSON(redisCtx, cacheKey, &entry)
+		if err == nil && found && entry.Result.Domain != "" {
+			if currentRevision == "" || entry.FeedRevision == currentRevision {
+				cached = entry.Result
+				return nil
+			}
+			return nil
+		}
+
+		var legacy analysis.Result
+		found, err = s.redis.GetJSON(redisCtx, cacheKey, &legacy)
 		if err != nil || !found {
 			return err
+		}
+		if currentRevision == "" {
+			cached = legacy
 		}
 		return nil
 	})
@@ -433,7 +463,11 @@ func (s *Service) analyze(ctx context.Context, domain string) (analysis.Result, 
 		return cached, true
 	}
 	if err != nil && !errors.Is(err, cache.ErrDisabled) {
-		log.Printf("analysis cache read failed for %s: %v", normalized, err)
+		logjson.Warn("analysis cache read failed", correlation.Fields(ctx, map[string]any{
+			"service": "risk",
+			"domain":  normalized,
+			"error":   err.Error(),
+		}))
 	}
 
 	// 2. Check Threat Feed
@@ -446,13 +480,20 @@ func (s *Service) analyze(ctx context.Context, domain string) (analysis.Result, 
 	s.enrichSuspicious(ctx, normalized, &result)
 	// 5. AI Refinement
 	result = s.refineWithAI(ctx, result)
-	
+
 	// Cache the final result
 	err = s.withRedis(ctx, func(redisCtx context.Context) error {
-		return s.redis.SetJSON(redisCtx, cacheKey, result, s.ttlFor(result.Verdict))
+		return s.redis.SetJSON(redisCtx, cacheKey, analysisCacheEntry{
+			Result:       result,
+			FeedRevision: currentRevision,
+		}, s.ttlFor(result.Verdict))
 	})
 	if err != nil && !errors.Is(err, cache.ErrDisabled) {
-		log.Printf("analysis cache write failed for %s: %v", normalized, err)
+		logjson.Warn("analysis cache write failed", correlation.Fields(ctx, map[string]any{
+			"service": "risk",
+			"domain":  normalized,
+			"error":   err.Error(),
+		}))
 	}
 
 	return result, false
@@ -462,7 +503,11 @@ func (s *Service) feedResult(ctx context.Context, domain string) analysis.Result
 	matched, err := s.matchThreatFeed(ctx, domain)
 	if err != nil {
 		if !errors.Is(err, cache.ErrDisabled) {
-			log.Printf("threat feed lookup failed for %s: %v", domain, err)
+			logjson.Warn("threat feed lookup failed", correlation.Fields(ctx, map[string]any{
+				"service": "risk",
+				"domain":  domain,
+				"error":   err.Error(),
+			}))
 		}
 		return analysis.Result{}
 	}
@@ -489,7 +534,11 @@ func (s *Service) refineWithAI(ctx context.Context, current analysis.Result) ana
 
 	aiResult, err := s.ai.Refine(ctx, current.Domain, current)
 	if err != nil {
-		log.Printf("local AI refinement failed for %s: %v", current.Domain, err)
+		logjson.Warn("local ai refinement failed", correlation.Fields(ctx, map[string]any{
+			"service": "risk",
+			"domain":  current.Domain,
+			"error":   err.Error(),
+		}))
 		return current
 	}
 	if aiResult.Verdict != analysis.VerdictMalicious {
@@ -621,6 +670,26 @@ func (s *Service) withRedis(parent context.Context, fn func(context.Context) err
 	return fn(ctx)
 }
 
+func (s *Service) currentFeedRevision(ctx context.Context) string {
+	if s == nil || s.feedRevisionKey == "" {
+		return ""
+	}
+
+	var revision string
+	err := s.withRedis(ctx, func(redisCtx context.Context) error {
+		value, err := s.redis.GetString(redisCtx, s.feedRevisionKey)
+		if err != nil {
+			return err
+		}
+		revision = value
+		return nil
+	})
+	if err != nil {
+		return ""
+	}
+	return revision
+}
+
 // --- Local Overrides ---
 
 func (s *Service) checkOverride(domain string) *analysis.Result {
@@ -629,7 +698,11 @@ func (s *Service) checkOverride(domain string) *analysis.Result {
 	}
 	override, err := s.store.GetOverride(domain)
 	if err != nil {
-		log.Printf("override check failed for %s: %v", domain, err)
+		logjson.Warn("override check failed", map[string]any{
+			"service": "risk",
+			"domain":  domain,
+			"error":   err.Error(),
+		})
 		return nil // fail-open
 	}
 	if override == nil {
@@ -786,4 +859,3 @@ func (s *Service) Whitelist() *Whitelist {
 	}
 	return s.whitelist
 }
-

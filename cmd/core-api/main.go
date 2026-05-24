@@ -6,8 +6,10 @@ import (
 	"crypto/subtle"
 	"encoding/json"
 	"fmt"
-	"log"
+	"net"
 	"net/http"
+	"net/url"
+	"os"
 	"strconv"
 	"strings"
 	"time"
@@ -16,6 +18,7 @@ import (
 	"safe-road/internal/auth"
 	"safe-road/internal/config"
 	"safe-road/internal/feed"
+	"safe-road/internal/logjson"
 	"safe-road/internal/observability"
 	"safe-road/internal/ratelimit"
 	"safe-road/internal/risk"
@@ -28,13 +31,14 @@ type analyzeRequest struct {
 }
 
 type statusResponse struct {
-	Service        string            `json:"service"`
-	Status         string            `json:"status"`
-	Mode           string            `json:"mode,omitempty"`
-	DeploymentTier string            `json:"deployment_tier,omitempty"`
-	Redis          *risk.CacheStatus `json:"redis,omitempty"`
-	Endpoints      []string          `json:"endpoints,omitempty"`
-	Time           string            `json:"time"`
+	Service        string              `json:"service"`
+	Status         string              `json:"status"`
+	Mode           string              `json:"mode,omitempty"`
+	DeploymentTier string              `json:"deployment_tier,omitempty"`
+	Redis          *risk.CacheStatus   `json:"redis,omitempty"`
+	FeedSync       *feed.StatusSummary `json:"feed_sync,omitempty"`
+	Endpoints      []string            `json:"endpoints,omitempty"`
+	Time           string              `json:"time"`
 }
 
 type app struct {
@@ -44,61 +48,57 @@ type app struct {
 	sessionSecret  []byte
 	adminPassword  string
 	adminAPIKey    string
+	publicHost     string
+	feedKey        string
+	feedPreset     string
+	feedSources    []string
+	feedStaleAfter time.Duration
 }
 
 func main() {
 	addr := config.String("SAFE_ROAD_CORE_API_ADDR", ":8080")
 	shutdownTimeout := config.DurationMillis("SAFE_ROAD_SHUTDOWN_TIMEOUT_MS", 10*time.Second)
 
-	secret, err := auth.GenerateSecureRandomString(32)
+	security, err := loadRuntimeSecurity()
 	if err != nil {
-		log.Fatalf("failed to generate session secret: %v", err)
-	}
-	sessionSecret := []byte(secret)
-
-	adminPassword := config.String("SAFE_ROAD_ADMIN_PASSWORD", "")
-	adminAPIKey := config.String("SAFE_ROAD_ADMIN_API_KEY", "")
-
-	if adminPassword == "" {
-		var err error
-		adminPassword, err = auth.GenerateSecureRandomString(16)
-		if err != nil {
-			log.Fatalf("failed to generate admin password: %v", err)
-		}
-		log.Println("┌─────────────────────────────────────────────────────────────────┐")
-		log.Println("│ [WARNING] SAFE_ROAD_ADMIN_PASSWORD is not configured in .env!   │")
-		log.Printf("│ Generated random admin password: %s │\n", adminPassword)
-		log.Println("└─────────────────────────────────────────────────────────────────┘")
-	} else if len(adminPassword) < 8 {
-		log.Println("┌─────────────────────────────────────────────────────────────────┐")
-		log.Println("│ [WARNING] SAFE_ROAD_ADMIN_PASSWORD is too weak (under 8 chars)! │")
-		log.Println("│ For production, please configure a strong password in .env!     │")
-		log.Println("└─────────────────────────────────────────────────────────────────┘")
+		logjson.Error("core-api security bootstrap failed", map[string]any{
+			"service": "core-api",
+			"error":   err.Error(),
+		})
+		os.Exit(1)
 	}
 
-	if adminAPIKey == "" {
-		var err error
-		adminAPIKey, err = auth.GenerateSecureRandomString(24)
-		if err != nil {
-			log.Fatalf("failed to generate admin API key: %v", err)
-		}
-		log.Println("┌─────────────────────────────────────────────────────────────────┐")
-		log.Println("│ [WARNING] SAFE_ROAD_ADMIN_API_KEY is not configured in .env!    │")
-		log.Printf("│ Generated random admin API key: %s  │\n", adminAPIKey)
-		log.Println("└─────────────────────────────────────────────────────────────────┘")
+	feedPreset := config.String("SAFE_ROAD_AGENT_FEED_PRESET", "")
+	feedSources, err := feed.ResolveSources(config.String("SAFE_ROAD_AGENT_FEED_SOURCES", ""), feedPreset)
+	if err != nil {
+		logjson.Error("core-api invalid threat feed configuration", map[string]any{
+			"service": "core-api",
+			"error":   err.Error(),
+		})
+		os.Exit(1)
 	}
+	feedKey := config.String("SAFE_ROAD_THREAT_FEED_KEY", feed.DefaultThreatFeedKey)
+	feedStaleAfter := config.DurationSeconds("SAFE_ROAD_AGENT_FEED_STALE_AFTER_SECONDS", 36*time.Hour)
 
 	api := &app{
 		risk:           risk.NewServiceFromEnv(),
 		metrics:        observability.NewRegistry(),
 		deploymentTier: config.String("SAFE_ROAD_DEPLOYMENT_TIER", "budget-vps"),
-		sessionSecret:  sessionSecret,
-		adminPassword:  adminPassword,
-		adminAPIKey:    adminAPIKey,
+		sessionSecret:  security.sessionSecret,
+		adminPassword:  security.adminPassword,
+		adminAPIKey:    security.adminAPIKey,
+		publicHost:     config.String("SAFE_ROAD_PUBLIC_HOST", ""),
+		feedKey:        feedKey,
+		feedPreset:     feedPreset,
+		feedSources:    feedSources,
+		feedStaleAfter: feedStaleAfter,
 	}
 	defer func() {
 		if err := api.risk.Close(); err != nil {
-			log.Printf("risk service close failed: %v", err)
+			logjson.Warn("risk service close failed", map[string]any{
+				"service": "core-api",
+				"error":   err.Error(),
+			})
 		}
 	}()
 	logCacheStatus("core-api", api.risk)
@@ -121,9 +121,11 @@ func main() {
 			ratelimit.Tier{PathPrefix: "/v1/overrides", Limiter: overrideLimiter},
 			ratelimit.Tier{PathPrefix: "/v1/telemetry", Limiter: telemetryLimiter},
 		)
-		log.Printf("core-api rate limiting enabled (analyze=%.0f/min, default=%.0f/min)",
-			config.Float64("SAFE_ROAD_RATELIMIT_ANALYZE_RPM", 10),
-			config.Float64("SAFE_ROAD_RATELIMIT_DEFAULT_RPM", 60))
+		logjson.Info("rate limiting enabled", map[string]any{
+			"service":     "core-api",
+			"analyze_rpm": config.Float64("SAFE_ROAD_RATELIMIT_ANALYZE_RPM", 10),
+			"default_rpm": config.Float64("SAFE_ROAD_RATELIMIT_DEFAULT_RPM", 60),
+		})
 	}
 
 	// --- Agent Engine ---
@@ -151,25 +153,20 @@ func main() {
 		)
 
 		// Feed Sync Task
-		feedSourcesRaw := config.String("SAFE_ROAD_AGENT_FEED_SOURCES", "")
-		var feedSources []string
-		if feedSourcesRaw != "" {
-			for _, s := range strings.Split(feedSourcesRaw, ",") {
-				s = strings.TrimSpace(s)
-				if s != "" {
-					feedSources = append(feedSources, s)
-				}
-			}
-		}
 		feedSyncTask := agent.NewFeedSyncTask(
 			api.risk.StoreDB(),
 			agent.FeedSyncConfig{
-				Sources:       feedSources,
-				RedisAddr:     config.String("SAFE_ROAD_REDIS_ADDR", ""),
-				RedisPassword: config.String("SAFE_ROAD_REDIS_PASSWORD", ""),
-				RedisDB:       config.Int("SAFE_ROAD_REDIS_DB", 0),
-				FeedKey:       config.String("SAFE_ROAD_THREAT_FEED_KEY", feed.DefaultThreatFeedKey),
-				Timeout:       config.DurationSeconds("SAFE_ROAD_AGENT_FEED_TIMEOUT_SECONDS", 2*time.Minute),
+				Sources:                    feedSources,
+				FileRoot:                   config.FeedFileRoot(),
+				MaxBytes:                   int64(config.Int("SAFE_ROAD_FEED_MAX_BYTES", int(feed.DefaultMaxFeedBytes))),
+				RedisAddr:                  config.String("SAFE_ROAD_REDIS_ADDR", ""),
+				RedisPassword:              config.SecretString("SAFE_ROAD_REDIS_PASSWORD", ""),
+				RedisDB:                    config.Int("SAFE_ROAD_REDIS_DB", 0),
+				FeedKey:                    feedKey,
+				Timeout:                    config.DurationSeconds("SAFE_ROAD_AGENT_FEED_TIMEOUT_SECONDS", 2*time.Minute),
+				ParserDriftInvalidRatio:    config.Float64("SAFE_ROAD_AGENT_FEED_DRIFT_INVALID_RATIO", 0.20),
+				ParserDriftMinInvalid:      config.Int("SAFE_ROAD_AGENT_FEED_DRIFT_MIN_INVALID", 25),
+				CacheInvalidationMinWrites: int64(config.Int("SAFE_ROAD_AGENT_FEED_CACHE_INVALIDATION_MIN_WRITES", 1)),
 			},
 		)
 		agentEngine.Register(
@@ -183,23 +180,24 @@ func main() {
 		alertTask := agent.NewAlertTask(
 			api.risk.StoreDB(),
 			agent.AlertConfig{
-				WebhookURL:      config.String("SAFE_ROAD_AGENT_WEBHOOK_URL", ""),
-				MinEvents:       config.Int("SAFE_ROAD_AGENT_ALERT_MIN_EVENTS", 1),
-				Timeout:         config.DurationSeconds("SAFE_ROAD_AGENT_ALERT_TIMEOUT_SECONDS", 30*time.Second),
-				TelegramEnabled: config.Bool("SAFE_ROAD_ALERT_TELEGRAM_ENABLED", false),
-				TelegramToken:   config.String("SAFE_ROAD_ALERT_TELEGRAM_TOKEN", ""),
-				TelegramChatID:  config.String("SAFE_ROAD_ALERT_TELEGRAM_CHAT_ID", ""),
-				SlackEnabled:    config.Bool("SAFE_ROAD_ALERT_SLACK_ENABLED", false),
-				SlackWebhookURL: config.String("SAFE_ROAD_ALERT_SLACK_WEBHOOK_URL", ""),
-				EmailEnabled:    config.Bool("SAFE_ROAD_ALERT_EMAIL_ENABLED", false),
-				EmailSMTPHost:   config.String("SAFE_ROAD_ALERT_EMAIL_SMTP_HOST", ""),
-				EmailSMTPPort:   config.Int("SAFE_ROAD_ALERT_EMAIL_SMTP_PORT", 0),
-				EmailFrom:       config.String("SAFE_ROAD_ALERT_EMAIL_FROM", ""),
-				EmailPassword:   config.String("SAFE_ROAD_ALERT_EMAIL_PASSWORD", ""),
-				EmailTo:         config.String("SAFE_ROAD_ALERT_EMAIL_TO", ""),
+				WebhookURL:        config.SecretString("SAFE_ROAD_AGENT_WEBHOOK_URL", ""),
+				MinEvents:         config.Int("SAFE_ROAD_AGENT_ALERT_MIN_EVENTS", 1),
+				Timeout:           config.DurationSeconds("SAFE_ROAD_AGENT_ALERT_TIMEOUT_SECONDS", 30*time.Second),
+				TelegramEnabled:   config.Bool("SAFE_ROAD_ALERT_TELEGRAM_ENABLED", false),
+				TelegramToken:     config.SecretString("SAFE_ROAD_ALERT_TELEGRAM_TOKEN", ""),
+				TelegramChatID:    config.String("SAFE_ROAD_ALERT_TELEGRAM_CHAT_ID", ""),
+				SlackEnabled:      config.Bool("SAFE_ROAD_ALERT_SLACK_ENABLED", false),
+				SlackWebhookURL:   config.SecretString("SAFE_ROAD_ALERT_SLACK_WEBHOOK_URL", ""),
+				EmailEnabled:      config.Bool("SAFE_ROAD_ALERT_EMAIL_ENABLED", false),
+				EmailSMTPHost:     config.String("SAFE_ROAD_ALERT_EMAIL_SMTP_HOST", ""),
+				EmailSMTPPort:     config.Int("SAFE_ROAD_ALERT_EMAIL_SMTP_PORT", 0),
+				EmailSMTPUsername: config.String("SAFE_ROAD_ALERT_EMAIL_USERNAME", ""),
+				EmailFrom:         config.String("SAFE_ROAD_ALERT_EMAIL_FROM", ""),
+				EmailPassword:     config.SecretString("SAFE_ROAD_ALERT_EMAIL_PASSWORD", ""),
+				EmailTo:           config.String("SAFE_ROAD_ALERT_EMAIL_TO", ""),
 			},
 		)
-		webhookURL := config.String("SAFE_ROAD_AGENT_WEBHOOK_URL", "")
+		webhookURL := config.SecretString("SAFE_ROAD_AGENT_WEBHOOK_URL", "")
 		alertEnabled := webhookURL != "" ||
 			config.Bool("SAFE_ROAD_ALERT_TELEGRAM_ENABLED", false) ||
 			config.Bool("SAFE_ROAD_ALERT_SLACK_ENABLED", false) ||
@@ -231,13 +229,15 @@ func main() {
 
 		agentEngine.Start()
 		defer agentEngine.Stop()
-		log.Println("agent engine enabled")
+		logjson.Info("agent engine enabled", map[string]any{"service": "core-api"})
 	}
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("/", api.statusHandler)
 	mux.HandleFunc("/healthz", healthHandler("core-api"))
 	mux.HandleFunc("/readyz", healthHandler("core-api"))
+	mux.HandleFunc("/block", api.blockPageHandler)
+	mux.HandleFunc("/block/report", api.blockReportHandler)
 	mux.HandleFunc("/v1/version", versionHandler)
 	mux.HandleFunc("/metrics", api.metricsHandler)
 	mux.HandleFunc("/v1/analyze", api.analyzeHandler)
@@ -261,19 +261,27 @@ func main() {
 	}
 
 	recoveryHandler := serve.Recovery(handler, api.metrics)
+	requestIDHandler := serve.WithRequestID(logRequests("core-api", recoveryHandler, api.metrics))
 
 	server := &http.Server{
 		Addr:              addr,
-		Handler:           logRequests(recoveryHandler, api.metrics),
+		Handler:           requestIDHandler,
 		ReadHeaderTimeout: 5 * time.Second,
 		ReadTimeout:       10 * time.Second,
 		WriteTimeout:      10 * time.Second,
 		IdleTimeout:       60 * time.Second,
 	}
 
-	log.Printf("core-api listening on %s", addr)
+	logjson.Info("service listening", map[string]any{
+		"service": "core-api",
+		"addr":    addr,
+	})
 	if err := serve.RunHTTPServer(server, shutdownTimeout); err != nil {
-		log.Fatal(err)
+		logjson.Error("core-api server stopped with error", map[string]any{
+			"service": "core-api",
+			"error":   err.Error(),
+		})
+		os.Exit(1)
 	}
 }
 
@@ -298,16 +306,19 @@ func (a *app) statusHandler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	cacheStatus := a.risk.CacheStatus(r.Context())
+	feedStatus := a.feedStatus(r.Context())
 	writeJSON(w, http.StatusOK, statusResponse{
 		Service:        "core-api",
 		Status:         "ok",
 		Mode:           "api",
 		DeploymentTier: a.deploymentTier,
 		Redis:          &cacheStatus,
+		FeedSync:       &feedStatus,
 		Endpoints: []string{
 			"/",
 			"/healthz",
 			"/readyz",
+			"/block",
 			"/v1/version",
 			"/v1/analyze?domain=example.com",
 			"/v1/analysis/recent",
@@ -329,10 +340,11 @@ func (a *app) metricsHandler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	writeJSON(w, http.StatusOK, map[string]any{
-		"service": "core-api",
-		"status":  "ok",
-		"metrics": a.metrics.Snapshot(),
-		"time":    time.Now().UTC().Format(time.RFC3339Nano),
+		"service":   "core-api",
+		"status":    "ok",
+		"metrics":   a.metrics.Snapshot(),
+		"feed_sync": a.feedStatus(r.Context()),
+		"time":      time.Now().UTC().Format(time.RFC3339Nano),
 	})
 }
 
@@ -386,13 +398,20 @@ func logCacheStatus(service string, riskService *risk.Service) {
 		return
 	}
 	if status.Status == "ok" {
-		log.Printf("%s redis cache connected", service)
+		logjson.Info("redis cache connected", map[string]any{"service": service})
 		return
 	}
-	log.Printf("%s redis cache unavailable at startup, continuing without hard dependency: %s", service, status.Error)
+	logjson.Warn("redis cache unavailable at startup", map[string]any{
+		"service": service,
+		"error":   status.Error,
+	})
 }
 
-func logRequests(next http.Handler, metrics *observability.Registry) http.Handler {
+func (a *app) feedStatus(ctx context.Context) feed.StatusSummary {
+	return feed.ReadStatusSummary(ctx, a.risk.RedisCache(), a.feedKey, a.feedPreset, a.feedSources, a.feedStaleAfter)
+}
+
+func logRequests(service string, next http.Handler, metrics *observability.Registry) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		started := time.Now()
 		recorder := &statusLoggingResponseWriter{ResponseWriter: w, statusCode: http.StatusOK}
@@ -400,7 +419,18 @@ func logRequests(next http.Handler, metrics *observability.Registry) http.Handle
 		if metrics != nil && r.Context().Value(serve.ObservedPanicKey) == nil {
 			metrics.Observe(r.Method, r.URL.Path, recorder.statusCode, recorder.bytesWritten, time.Since(started))
 		}
-		log.Printf("%s %s %d %dB %s", sanitizeLog(r.Method), sanitizeLog(r.URL.Path), recorder.statusCode, recorder.bytesWritten, time.Since(started).Truncate(time.Millisecond)) // #nosec G706 -- request values are escaped by sanitizeLog before logging.
+		clientInfo := extractClientInfo(r)
+		logjson.Info("http request", map[string]any{
+			"service":     service,
+			"request_id":  serve.RequestID(r.Context()),
+			"method":      sanitizeLog(r.Method),
+			"path":        sanitizeLog(r.URL.Path),
+			"status":      recorder.statusCode,
+			"bytes":       recorder.bytesWritten,
+			"duration_ms": time.Since(started).Milliseconds(),
+			"client_ip":   clientInfo.IP,
+			"client_id":   clientInfo.ClientID,
+		})
 	})
 }
 
@@ -428,7 +458,10 @@ func writeJSON(w http.ResponseWriter, statusCode int, payload any) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(statusCode)
 	if err := json.NewEncoder(w).Encode(payload); err != nil {
-		log.Printf("write response failed: %v", err)
+		logjson.Error("write response failed", map[string]any{
+			"service": "core-api",
+			"error":   err.Error(),
+		})
 	}
 }
 
@@ -1004,6 +1037,10 @@ func (a *app) requireAuthFunc(next http.HandlerFunc) http.HandlerFunc {
 		if err == nil && cookie.Value != "" {
 			_, err = auth.VerifySessionCookieValue(cookie.Value, a.sessionSecret)
 			if err == nil {
+				if isStateChangingMethod(r.Method) && !a.validCSRFSources(r) {
+					writeError(w, http.StatusForbidden, "invalid csrf origin")
+					return
+				}
 				next(w, r)
 				return
 			}
@@ -1011,4 +1048,56 @@ func (a *app) requireAuthFunc(next http.HandlerFunc) http.HandlerFunc {
 
 		writeError(w, http.StatusUnauthorized, "unauthorized")
 	}
+}
+
+func isStateChangingMethod(method string) bool {
+	switch method {
+	case http.MethodPost, http.MethodPut, http.MethodPatch, http.MethodDelete:
+		return true
+	default:
+		return false
+	}
+}
+
+func (a *app) validCSRFSources(r *http.Request) bool {
+	source := strings.TrimSpace(r.Header.Get("Origin"))
+	if source == "" {
+		source = strings.TrimSpace(r.Header.Get("Referer"))
+	}
+	if source == "" {
+		return false
+	}
+
+	parsed, err := url.Parse(source)
+	if err != nil || parsed.Host == "" {
+		return false
+	}
+
+	sourceHost := canonicalRequestHost(parsed.Host)
+	for _, allowed := range []string{r.Host, a.publicHost, config.String("SAFE_ROAD_PUBLIC_HOST", "")} {
+		if sourceHost == canonicalRequestHost(allowed) {
+			return true
+		}
+	}
+	return false
+}
+
+func canonicalRequestHost(value string) string {
+	value = strings.TrimSpace(strings.ToLower(value))
+	if value == "" {
+		return ""
+	}
+	if strings.Contains(value, "://") {
+		if parsed, err := url.Parse(value); err == nil {
+			value = parsed.Host
+		}
+	}
+	value = strings.TrimSuffix(value, "/")
+	if host, port, err := net.SplitHostPort(value); err == nil {
+		if port == "80" || port == "443" {
+			return host
+		}
+		return net.JoinHostPort(host, port)
+	}
+	return value
 }
