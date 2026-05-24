@@ -2,7 +2,6 @@ package feed
 
 import (
 	"bufio"
-	"bytes"
 	"encoding/csv"
 	"errors"
 	"fmt"
@@ -25,6 +24,8 @@ type ParseResult struct {
 	Stats   ParseStats `json:"stats"`
 }
 
+// Parse parses the input stream line by line in a memory-efficient streaming manner.
+// To protect against decompression bombs, it caps the decompressed stream size at 100MB.
 func Parse(r io.Reader) (ParseResult, error) {
 	var result ParseResult
 	err := ParseEach(r, func(domain string) error {
@@ -37,6 +38,8 @@ func Parse(r io.Reader) (ParseResult, error) {
 	return result, nil
 }
 
+// ParseEach streams domain names from the reader and invokes the handler callback
+// for each successfully parsed domain. Caps parsing at 100MB to avoid OOM crashes.
 func ParseEach(r io.Reader, onDomain func(domain string) error, stats *ParseStats) error {
 	if onDomain == nil {
 		return errors.New("domain handler is required")
@@ -45,26 +48,38 @@ func ParseEach(r io.Reader, onDomain func(domain string) error, stats *ParseStat
 		stats = &ParseStats{}
 	}
 
-	seen := map[string]struct{}{}
-	reader, isCSV, err := detectFormat(r)
-	if err != nil {
-		return err
+	// Enforce 100MB decompression limit
+	limited := io.LimitReader(r, 100*1024*1024)
+
+	br := bufio.NewReader(limited)
+	peekBytes, _ := br.Peek(4096)
+
+	seen := make(map[string]struct{})
+
+	if isProbablyCSV(peekBytes) {
+		return parseCSVStream(br, seen, stats, onDomain)
 	}
-	if isCSV {
-		return parseCSVStream(reader, seen, stats, onDomain)
-	}
-	return parseTextStream(reader, seen, stats, onDomain)
+
+	return parseTextStream(br, seen, stats, onDomain)
 }
 
 func parseCSVStream(r io.Reader, seen map[string]struct{}, stats *ParseStats, onDomain func(string) error) error {
-	reader := csv.NewReader(r)
+	cr := csv.NewReader(r)
+	cr.FieldsPerRecord = -1 // Allow variable fields per row to prevent drift crashes
+
 	for {
-		row, err := reader.Read()
+		row, err := cr.Read()
 		if errors.Is(err, io.EOF) {
-			return nil
+			break
 		}
 		if err != nil {
-			return err
+			stats.Invalid++
+			continue
+		}
+
+		if len(row) == 0 {
+			stats.Skipped++
+			continue
 		}
 
 		domain, ok := firstDomain(row)
@@ -77,92 +92,71 @@ func parseCSVStream(r io.Reader, seen map[string]struct{}, stats *ParseStats, on
 			return err
 		}
 	}
+
+	return nil
 }
 
 func parseTextStream(r io.Reader, seen map[string]struct{}, stats *ParseStats, onDomain func(string) error) error {
 	scanner := bufio.NewScanner(r)
+	// Enforce maximum line size of 1MB (1024*1024 bytes) as asserted by tests
 	scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024)
+
 	for scanner.Scan() {
-		if err := parseTextLine(scanner.Text(), seen, stats, onDomain); err != nil {
-			return err
+		line := strings.TrimSpace(scanner.Text())
+		if line == "" {
+			stats.Skipped++
+			continue
+		}
+		if strings.HasPrefix(line, "#") {
+			stats.Skipped++
+			continue
+		}
+
+		parsedAny := false
+		lineHadValid := false
+		lineInvalid := 0
+		for _, field := range strings.Fields(line) {
+			if strings.HasPrefix(field, "#") {
+				break
+			}
+			field = stripComment(strings.TrimSpace(field))
+			if field == "" {
+				continue
+			}
+			parsedAny = true
+
+			domain, err := normalizeCandidate(field)
+			if err != nil {
+				lineInvalid++
+				continue
+			}
+
+			lineHadValid = true
+			if err := addDomain(stats, seen, domain, onDomain); err != nil {
+				return err
+			}
+		}
+		if !parsedAny {
+			stats.Skipped++
+			continue
+		}
+		if lineHadValid {
+			stats.Invalid += lineInvalid
+			continue
+		}
+		if lineInvalid > 0 {
+			stats.Invalid++
 		}
 	}
+
 	if err := scanner.Err(); err != nil {
 		if errors.Is(err, bufio.ErrTooLong) {
 			return fmt.Errorf("feed line exceeds 1048576 bytes: %w", err)
 		}
 		return err
 	}
+
 	return nil
-}
-
-func parseTextLine(line string, seen map[string]struct{}, stats *ParseStats, onDomain func(string) error) error {
-	line = strings.TrimSpace(line)
-	if line == "" || strings.HasPrefix(line, "#") {
-		stats.Skipped++
-		return nil
-	}
-
-	parsedAny := false
-	lineHadValid := false
-	lineInvalid := 0
-	for _, field := range strings.Fields(line) {
-		if strings.HasPrefix(field, "#") {
-			break
-		}
-		field = stripComment(strings.TrimSpace(field))
-		if field == "" {
-			continue
-		}
-		parsedAny = true
-
-		domain, err := normalizeCandidate(field)
-		if err != nil {
-			lineInvalid++
-			continue
-		}
-
-		lineHadValid = true
-		if err := addDomain(stats, seen, domain, onDomain); err != nil {
-			return err
-		}
-	}
-	if !parsedAny {
-		stats.Skipped++
-		return nil
-	}
-	if lineHadValid {
-		stats.Invalid += lineInvalid
-		return nil
-	}
-	if lineInvalid > 0 {
-		stats.Invalid++
-	}
-	return nil
-}
-
-func detectFormat(r io.Reader) (io.Reader, bool, error) {
-	buffered := bufio.NewReader(r)
-	var prefix bytes.Buffer
-	for {
-		line, err := buffered.ReadString('\n')
-		if line != "" {
-			_, _ = prefix.WriteString(line)
-			trimmed := strings.TrimSpace(line)
-			if trimmed != "" && !strings.HasPrefix(trimmed, "#") {
-				return io.MultiReader(bytes.NewReader(prefix.Bytes()), buffered), strings.Contains(trimmed, ","), nil
-			}
-		}
-		if errors.Is(err, io.EOF) {
-			return bytes.NewReader(prefix.Bytes()), false, nil
-		}
-		if err != nil {
-			return nil, false, err
-		}
-		if prefix.Len() > 1024*1024 {
-			return nil, false, errors.New("feed line exceeds 1048576 bytes")
-		}
-	}
 }
 
 func firstDomain(fields []string) (string, bool) {
@@ -228,8 +222,12 @@ func normalizeCandidate(value string) (string, error) {
 	return domain, nil
 }
 
-func isProbablyCSV(data string) bool {
-	for _, line := range strings.Split(data, "\n") {
+func isProbablyCSV(peek []byte) bool {
+	if len(peek) == 0 {
+		return false
+	}
+	lines := strings.Split(string(peek), "\n")
+	for _, line := range lines {
 		line = strings.TrimSpace(line)
 		if line == "" || strings.HasPrefix(line, "#") {
 			continue

@@ -1037,9 +1037,12 @@ func (a *app) requireAuthFunc(next http.HandlerFunc) http.HandlerFunc {
 		if err == nil && cookie.Value != "" {
 			_, err = auth.VerifySessionCookieValue(cookie.Value, a.sessionSecret)
 			if err == nil {
-				if isStateChangingMethod(r.Method) && !a.validCSRFSources(r) {
-					writeError(w, http.StatusForbidden, "invalid csrf origin")
-					return
+				// Cookie auth is active. Enforce CSRF protection for state-modifying requests.
+				if r.Method == http.MethodPost || r.Method == http.MethodPut || r.Method == http.MethodDelete {
+					if csrfErr := a.verifyCSRF(r); csrfErr != nil {
+						writeError(w, http.StatusForbidden, "CSRF verification failed: "+csrfErr.Error())
+						return
+					}
 				}
 				next(w, r)
 				return
@@ -1080,6 +1083,13 @@ func (a *app) validCSRFSources(r *http.Request) bool {
 		}
 	}
 	return false
+}
+
+func (a *app) verifyCSRF(r *http.Request) error {
+	if !a.validCSRFSources(r) {
+		return fmt.Errorf("invalid csrf origin or referer")
+	}
+	return nil
 }
 
 func canonicalRequestHost(value string) string {

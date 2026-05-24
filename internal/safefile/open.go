@@ -2,6 +2,7 @@ package safefile
 
 import (
 	"errors"
+	"fmt"
 	"io"
 	"os"
 	"path/filepath"
@@ -15,8 +16,8 @@ type File struct {
 
 // OpenWithin opens requestedPath through an os.Root scoped to rootDir.
 // requestedPath may be relative to rootDir, or it may be an existing documented
-// root-prefixed path such as ./ops/secrets/name. Paths outside rootDir are
-// rejected before final resolution, and os.Root blocks symlink traversal.
+// root-prefixed path. Paths outside rootDir are rejected before final resolution,
+// and Go's os.Root blocks any traversal escaping the sandbox.
 func OpenWithin(rootDir, requestedPath string) (*File, error) {
 	relativePath, err := relativeWithinRoot(rootDir, requestedPath)
 	if err != nil {
@@ -25,25 +26,65 @@ func OpenWithin(rootDir, requestedPath string) (*File, error) {
 
 	root, err := os.OpenRoot(rootDir)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("failed to open root sandbox %q: %w", rootDir, err)
 	}
 
 	file, err := root.Open(relativePath)
 	if err != nil {
 		_ = root.Close()
-		return nil, err
+		return nil, fmt.Errorf("failed to open file inside sandbox %q: %w", relativePath, err)
 	}
 
 	return &File{File: file, root: root}, nil
 }
 
-// Open opens a path relative to the current directory. Prefer OpenWithin for
-// caller-controlled paths that should be sandboxed to a fixed root.
+// Open opens a path relative to the current directory.
+// For caller-controlled paths that should be sandboxed to a fixed root, use OpenWithin instead.
 func Open(path string) (*File, error) {
 	if path == "" {
 		return nil, errors.New("file path is required")
 	}
 
+	// First, check if path resides within a trusted base directory to resolve it safely
+	absPath, err := filepath.Abs(filepath.Clean(path))
+	if err == nil {
+		cwd, err := filepath.Abs(".")
+		if err == nil {
+			// Secrets directory
+			secretsDir := os.Getenv("SAFE_ROAD_SECRETS_DIR")
+			if secretsDir == "" {
+				secretsDir = filepath.Join(cwd, "ops", "secrets")
+			}
+			absSecrets, _ := filepath.Abs(secretsDir)
+
+			// Data directory
+			sqlitePath := os.Getenv("SAFE_ROAD_SQLITE_PATH")
+			var dataDir string
+			if sqlitePath != "" {
+				dataDir = filepath.Dir(sqlitePath)
+			} else {
+				dataDir = filepath.Join(cwd, "data")
+			}
+			absData, _ := filepath.Abs(dataDir)
+
+			roots := []string{cwd}
+			if absSecrets != "" {
+				roots = append(roots, absSecrets)
+			}
+			if absData != "" {
+				roots = append(roots, absData)
+			}
+
+			for _, rPath := range roots {
+				rel, err := filepath.Rel(rPath, absPath)
+				if err == nil && !strings.HasPrefix(rel, "..") && rel != ".." {
+					return OpenWithin(rPath, rel)
+				}
+			}
+		}
+	}
+
+	// Fallback to local workspace sandboxing
 	return OpenWithin(".", path)
 }
 
@@ -73,10 +114,18 @@ func ReadFileWithin(rootDir, requestedPath string) ([]byte, error) {
 	return io.ReadAll(file)
 }
 
-// ReadFile reads a path relative to the current directory. Prefer
-// ReadFileWithin for caller-controlled paths that should be sandboxed.
+// ReadFile reads a path relative to the current directory.
+// For caller-controlled paths that should be sandboxed, use ReadFileWithin instead.
 func ReadFile(path string) ([]byte, error) {
-	return ReadFileWithin(".", path)
+	file, err := Open(path)
+	if err != nil {
+		return nil, err
+	}
+	defer func() {
+		_ = file.Close()
+	}()
+
+	return io.ReadAll(file)
 }
 
 func relativeWithinRoot(rootDir, requestedPath string) (string, error) {

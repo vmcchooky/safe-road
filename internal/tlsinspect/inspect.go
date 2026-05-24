@@ -5,12 +5,9 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"net"
-	"net/netip"
 	"strings"
 	"time"
 )
-
-var lookupIPAddr = net.DefaultResolver.LookupIPAddr
 
 // Result contains the outcome of inspecting a domain's TLS certificate.
 // All fields are safe to use even when HasTLS is false (fail-open).
@@ -30,39 +27,49 @@ type Result struct {
 	Reasons     []string  `json:"reasons"`
 }
 
+// Package-level resolver function supporting test mock injection
+var lookupIPAddr = func(ctx context.Context, host string) ([]net.IPAddr, error) {
+	return net.DefaultResolver.LookupIPAddr(ctx, host)
+}
+
 // Inspect performs a TLS handshake to domain:443, extracts the leaf certificate
 // and returns a scored Result. Returns a zero-score Result on any error (fail-open).
 func Inspect(ctx context.Context, domain string) Result {
-	domain = strings.TrimSpace(strings.TrimSuffix(domain, "."))
+	// 1. Resolve IP addresses first to prevent SSRF using lookupIPAddr (supports test mocks)
 	ips, err := lookupIPAddr(ctx, domain)
 	if err != nil || len(ips) == 0 {
 		return Result{HasTLS: false, Reasons: []string{}}
 	}
-	targetIP := ""
-	for _, ip := range ips {
-		if isBlockedDialIP(ip.IP) {
-			return Result{HasTLS: false, Reasons: []string{"tls: blocked connection to private ip"}}
+
+	// Filter for the first valid public IP
+	var publicIP net.IP
+	for _, ipAddr := range ips {
+		if isPublicIP(ipAddr.IP) {
+			publicIP = ipAddr.IP
+			break
 		}
-		if targetIP == "" {
-			targetIP = ip.IP.String()
-		}
-	}
-	if targetIP == "" {
-		return Result{HasTLS: false, Reasons: []string{}}
 	}
 
+	if publicIP == nil {
+		return Result{
+			HasTLS:  false,
+			Reasons: []string{"tls: blocked connection to private ip"},
+		}
+	}
+
+	// 2. Perform secure TLS dialing using the resolved public IP
 	dialer := &tls.Dialer{
 		Config: &tls.Config{
 			InsecureSkipVerify: true, // #nosec G402 -- intentional: we inspect the cert ourselves
-			ServerName:         domain,
+			ServerName:         domain, // Keep domain for SNI
+			MinVersion:         tls.VersionTLS12,
 		},
 		NetDialer: &net.Dialer{
-			Timeout:   3 * time.Second,
-			KeepAlive: 30 * time.Second,
+			Timeout: 3 * time.Second, // explicit connection timeout to prevent hanging
 		},
 	}
 
-	conn, err := dialer.DialContext(ctx, "tcp", net.JoinHostPort(targetIP, "443"))
+	conn, err := dialer.DialContext(ctx, "tcp", net.JoinHostPort(publicIP.String(), "443"))
 	if err != nil {
 		// No TLS or unreachable — minor signal only (don't penalise)
 		return Result{HasTLS: false, Reasons: []string{}}
@@ -83,25 +90,21 @@ func Inspect(ctx context.Context, domain string) Result {
 	return scoreResult(domain, cert)
 }
 
-func isBlockedDialIP(ip net.IP) bool {
+func isPublicIP(ip net.IP) bool {
 	if ip == nil {
-		return true
+		return false
 	}
-	if ip.IsLoopback() || ip.IsPrivate() || ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast() || ip.IsMulticast() || ip.IsUnspecified() {
-		return true
+	// Check standard loopback, private, link-local, unspecified
+	if ip.IsLoopback() || ip.IsPrivate() || ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast() || ip.IsUnspecified() {
+		return false
 	}
-	addr, ok := netip.AddrFromSlice(ip)
-	if !ok {
-		return true
+	// Explicitly check Carrier-Grade NAT (CGNAT) Shared Address Space (RFC 6598: 100.64.0.0/10)
+	if ip4 := ip.To4(); ip4 != nil {
+		if ip4[0] == 100 && ip4[1] >= 64 && ip4[1] <= 127 {
+			return false
+		}
 	}
-	if addr.Is4In6() {
-		addr = addr.Unmap()
-	}
-	if addr.IsPrivate() || addr.IsLoopback() || addr.IsLinkLocalUnicast() || addr.IsMulticast() || addr.IsUnspecified() {
-		return true
-	}
-	cgnat := netip.MustParsePrefix("100.64.0.0/10")
-	return cgnat.Contains(addr)
+	return true
 }
 
 // scoreResult builds a Result from a parsed x509 leaf certificate.

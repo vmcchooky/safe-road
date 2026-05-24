@@ -99,6 +99,11 @@ type DomainCount struct {
 	Count  int    `json:"count"`
 }
 
+type cidrMapping struct {
+	groupID int64
+	ipNet   *net.IPNet
+}
+
 // DB wraps a SQLite connection with telemetry and override capabilities.
 type DB struct {
 	db            *sql.DB
@@ -106,6 +111,10 @@ type DB struct {
 	retentionDays int
 	done          chan struct{}
 	wg            sync.WaitGroup
+
+	// CIDR Cache
+	cidrMu    sync.RWMutex
+	cidrCache []cidrMapping
 }
 
 const schema = `
@@ -265,6 +274,12 @@ func New(path string, retentionDays int) (*DB, error) {
 	if err := d.CreateDefaultGroups(); err != nil {
 		_ = sqlDB.Close() // #nosec G104 -- error path; primary error already captured
 		return nil, fmt.Errorf("create default groups: %w", err)
+	}
+
+	// Load CIDR mappings cache into memory for fast DNS querying
+	if err := d.loadCIDRCache(); err != nil {
+		_ = sqlDB.Close()
+		return nil, fmt.Errorf("load cidr cache: %w", err)
 	}
 
 	d.wg.Add(2)
@@ -984,7 +999,16 @@ func (d *DB) AddMappingInt(mappingType, value string, groupID int64) (int64, err
 		return 0, fmt.Errorf("insert mapping (%s, %s) -> group %d: %w", mappingType, value, groupID, err)
 	}
 
-	return res.LastInsertId()
+	lastID, err := res.LastInsertId()
+	if err != nil {
+		return 0, err
+	}
+
+	if mappingType == "cidr" {
+		_ = d.loadCIDRCache()
+	}
+
+	return lastID, nil
 }
 
 // DeleteMapping removes a client device mapping.
@@ -1003,6 +1027,7 @@ func (d *DB) DeleteMapping(id int64) error {
 		return fmt.Errorf("mapping not found: id %d", id)
 	}
 
+	_ = d.loadCIDRCache()
 	return nil
 }
 
@@ -1141,23 +1166,23 @@ func (d *DB) GetGroupForClient(clientIP, clientID string) (*ClientGroup, error) 
 		}
 	}
 
-	// 3. Check CIDR mapping
+	// 3. Check CIDR mapping in high-performance RAM cache
 	if clientIP != "" {
 		ip := net.ParseIP(clientIP)
 		if ip != nil {
-			rows, err := d.db.Query("SELECT group_id, value FROM client_mappings WHERE mapping_type = 'cidr'")
-			if err == nil {
-				defer rows.Close()
-				for rows.Next() {
-					var groupID int64
-					var cidrVal string
-					if err := rows.Scan(&groupID, &cidrVal); err == nil {
-						_, ipNet, err := net.ParseCIDR(cidrVal)
-						if err == nil && ipNet.Contains(ip) {
-							return d.GetGroup(groupID)
-						}
-					}
+			d.cidrMu.RLock()
+			cache := d.cidrCache
+			var matchedGroupID int64
+			for _, entry := range cache {
+				if entry.ipNet.Contains(ip) {
+					matchedGroupID = entry.groupID
+					break
 				}
+			}
+			d.cidrMu.RUnlock()
+
+			if matchedGroupID > 0 {
+				return d.GetGroup(matchedGroupID)
 			}
 		}
 	}
@@ -1217,4 +1242,36 @@ func (d *DB) GetEffectiveOverride(groupID int64, domain string) (*Override, erro
 	}
 
 	return nil, nil
+}
+
+func (d *DB) loadCIDRCache() error {
+	if !d.Enabled() {
+		return nil
+	}
+
+	rows, err := d.db.Query("SELECT group_id, value FROM client_mappings WHERE mapping_type = 'cidr'")
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+
+	var cache []cidrMapping
+	for rows.Next() {
+		var groupID int64
+		var cidrVal string
+		if err := rows.Scan(&groupID, &cidrVal); err == nil {
+			_, ipNet, err := net.ParseCIDR(cidrVal)
+			if err == nil {
+				cache = append(cache, cidrMapping{
+					groupID: groupID,
+					ipNet:   ipNet,
+				})
+			}
+		}
+	}
+
+	d.cidrMu.Lock()
+	d.cidrCache = cache
+	d.cidrMu.Unlock()
+	return nil
 }
