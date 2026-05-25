@@ -17,7 +17,7 @@ const (
 	minAdminPasswordLength      = 12
 	minAdminAPIKeyLength        = 24
 	localAdminSecretsDir        = "tmp"
-	localAdminSecretsFile       = "tmp/local_admin_secrets.txt"
+	localAdminSecretsFile       = "tmp/local_admin_secrets.txt" // #nosec G101 -- file path only, not an embedded credential.
 )
 
 type runtimeSecurity struct {
@@ -124,7 +124,7 @@ func writeLocalAdminSecrets(adminPassword, adminAPIKey string) error {
 		content.WriteString("\n")
 	}
 
-	if err := os.MkdirAll(localAdminSecretsDir, 0o755); err != nil {
+	if err := os.MkdirAll(localAdminSecretsDir, 0o750); err != nil {
 		return fmt.Errorf("create local admin secrets directory: %w", err)
 	}
 	if err := os.WriteFile(localAdminSecretsFile, []byte(content.String()), 0o600); err != nil {

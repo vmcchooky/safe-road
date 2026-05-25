@@ -290,14 +290,19 @@ func doRequest(client *http.Client, req *http.Request) (int, error) {
 func (p *domainPicker) Next() string {
 	next := p.count.Add(1) - 1
 	if len(p.custom) > 0 {
-		return p.custom[int(next%uint64(len(p.custom)))]
+		return p.custom[boundedIndex(next, len(p.custom))]
 	}
 
-	domain := defaultDomains[int(next%uint64(len(defaultDomains)))]
+	domain := defaultDomains[boundedIndex(next, len(defaultDomains))]
 	if domain != "" {
 		return domain
 	}
 	return randomDomain(next)
+}
+
+func boundedIndex(next uint64, length int) int {
+	// #nosec G115 -- modulo bounds idx to [0, length), and length is already an int.
+	return int(next % uint64(length))
 }
 
 func randomDomain(seed uint64) string {
