@@ -8,6 +8,18 @@ stack="${SAFE_ROAD_STACK:-production}"
 
 cd "$project_dir"
 
+log_info() {
+  printf '%s\n' "$*"
+}
+
+log_warn() {
+  printf 'WARN: %s\n' "$*" >&2
+}
+
+log_error() {
+  printf 'ERROR: %s\n' "$*" >&2
+}
+
 compose_stack() {
   selected_stack="$1"
   shift
@@ -19,10 +31,275 @@ compose_stack() {
       $compose -f docker-compose.yml -f docker-compose.dev.yml "$@"
       ;;
     *)
-      echo "unknown SAFE_ROAD_STACK: $selected_stack" >&2
+      log_error "unknown SAFE_ROAD_STACK: $selected_stack"
       exit 2
       ;;
   esac
+}
+
+compose_up_stack() {
+  case "$stack" in
+    production)
+      compose_stack production --profile production-edge up -d
+      ;;
+    dev)
+      compose_stack dev up -d
+      ;;
+  esac
+}
+
+compose_container_id() {
+  service="$1"
+  compose_stack "$stack" ps -q "$service" 2>/dev/null || true
+}
+
+compose_container_id_all() {
+  service="$1"
+  compose_stack "$stack" ps -aq "$service" 2>/dev/null || true
+}
+
+env_value() {
+  key="$1"
+  eval "value=\${$key:-}"
+  if [ -n "$value" ]; then
+    printf '%s' "$value"
+    return 0
+  fi
+
+  if [ -f .env ]; then
+    value="$(grep -E "^[[:space:]]*${key}=" .env | tail -n 1 | sed -E "s/^[[:space:]]*${key}=//" | tr -d '\r' || true)"
+    value="$(printf '%s' "$value" | sed -E 's/^[[:space:]]*//; s/[[:space:]]*$//; s/^"//; s/"$//')"
+    case "$value" in
+      \'*\')
+        value="${value#\'}"
+        value="${value%\'}"
+        ;;
+    esac
+    if [ -n "$value" ]; then
+      printf '%s' "$value"
+    fi
+  fi
+}
+
+sqlite_runtime_path() {
+  configured="$(env_value SAFE_ROAD_SQLITE_PATH || true)"
+  if [ -z "$configured" ]; then
+    configured="data/safe-road.db"
+  fi
+
+  case "$configured" in
+    /app/data/*)
+      printf '%s/%s' "${project_dir}/data" "${configured#/app/data/}"
+      ;;
+    /*)
+      printf '%s' "$configured"
+      ;;
+    ./*)
+      printf '%s/%s' "$project_dir" "${configured#./}"
+      ;;
+    *)
+      printf '%s/%s' "$project_dir" "$configured"
+      ;;
+  esac
+}
+
+quote_sqlite_path() {
+  printf '%s' "$1" | sed "s/'/''/g"
+}
+
+backup_redis() {
+  target="$1"
+  log_info "Creating Redis snapshot..."
+  compose_stack "$stack" exec -T redis redis-cli SAVE >/dev/null
+
+  container_id="$(compose_container_id redis)"
+  if [ -z "$container_id" ]; then
+    log_warn "Redis container is not running; skipping Redis snapshot copy"
+    return 0
+  fi
+
+  docker cp "${container_id}:/data/dump.rdb" "${target}/redis-dump.rdb"
+}
+
+backup_sqlite() {
+  target="$1"
+  source_db="$(sqlite_runtime_path)"
+  target_db="${target}/safe-road.db"
+
+  if [ -f "$source_db" ]; then
+    if command -v sqlite3 >/dev/null 2>&1; then
+      log_info "Creating SQLite hot backup from ${source_db}..."
+      escaped_target="$(quote_sqlite_path "$target_db")"
+      sqlite3 "$source_db" ".backup '${escaped_target}'"
+    else
+      log_warn "sqlite3 CLI not found; copying SQLite database directly"
+      cp "$source_db" "$target_db"
+    fi
+    return 0
+  fi
+
+  container_id="$(compose_container_id core-api)"
+  if [ -n "$container_id" ]; then
+    log_warn "Host SQLite database not found at ${source_db}; copying from core-api container"
+    docker cp "${container_id}:/app/data/safe-road.db" "$target_db" || log_warn "SQLite database not found in core-api container"
+    return 0
+  fi
+
+  log_warn "SQLite database not found at ${source_db}; skipping SQLite backup"
+}
+
+copy_optional_snapshots() {
+  target="$1"
+  if [ -f .env ]; then
+    cp .env "${target}/env.snapshot"
+  fi
+  if [ -f Caddyfile ]; then
+    cp Caddyfile "${target}/Caddyfile.snapshot"
+  fi
+}
+
+sync_offsite() {
+  local_dir="$1"
+  ts="$2"
+  remote="$(env_value SAFE_ROAD_RCLONE_REMOTE || true)"
+  dest="$(env_value SAFE_ROAD_RCLONE_DEST || true)"
+
+  if [ -z "$remote" ]; then
+    return 0
+  fi
+  if [ -z "$dest" ]; then
+    dest="safe-road-backups"
+  fi
+  if ! command -v rclone >/dev/null 2>&1; then
+    log_error "SAFE_ROAD_RCLONE_REMOTE is configured but rclone is not installed; skipping offsite upload"
+    return 0
+  fi
+
+  remote_name="${remote%:}"
+  remote_target="${remote_name}:${dest}/${ts}"
+  log_info "Uploading backup to ${remote_target}..."
+  if rclone copy "$local_dir" "$remote_target"; then
+    log_info "Offsite backup upload completed: ${remote_target}"
+  else
+    log_error "Offsite backup upload failed: ${remote_target}"
+  fi
+}
+
+latest_backup_dir() {
+  if [ ! -d "$backup_dir" ]; then
+    return 1
+  fi
+  for entry in "$backup_dir"/*; do
+    [ -d "$entry" ] || continue
+    printf '%s\n' "$entry"
+  done | sort | tail -n 1
+}
+
+resolve_backup_dir() {
+  src="${1:-}"
+  if [ -n "$src" ]; then
+    if [ -d "$src" ]; then
+      (CDPATH= cd -- "$src" && pwd)
+      return 0
+    fi
+    if [ -f "$src" ]; then
+      (CDPATH= cd -- "$(dirname -- "$src")" && pwd)
+      return 0
+    fi
+    log_error "backup path not found: $src"
+    exit 2
+  fi
+
+  latest="$(latest_backup_dir || true)"
+  if [ -z "$latest" ]; then
+    log_error "no backups found in ${backup_dir}"
+    exit 2
+  fi
+  printf '%s' "$latest"
+}
+
+stop_for_restore() {
+  log_info "Stopping services that may hold Redis/SQLite locks..."
+  compose_stack "$stack" stop core-api dns-resolver feed-syncd redis >/dev/null 2>&1 || true
+}
+
+restore_sqlite() {
+  src_dir="$1"
+  src_db="${src_dir}/safe-road.db"
+  target_db="$(sqlite_runtime_path)"
+
+  if [ ! -f "$src_db" ]; then
+    log_warn "No safe-road.db found in ${src_dir}; skipping SQLite restore"
+    return 0
+  fi
+
+  mkdir -p "$(dirname -- "$target_db")"
+  cp "$src_db" "$target_db"
+  log_info "Restored SQLite database to ${target_db}"
+
+  container_id="$(compose_container_id_all core-api)"
+  if [ -n "$container_id" ]; then
+    docker cp "$src_db" "${container_id}:/app/data/safe-road.db" || log_warn "Could not copy SQLite database into core-api container volume"
+  fi
+}
+
+restore_redis() {
+  src_dir="$1"
+  src_rdb="${src_dir}/redis-dump.rdb"
+  if [ ! -f "$src_rdb" ]; then
+    src_rdb="${src_dir}/dump.rdb"
+  fi
+
+  if [ ! -f "$src_rdb" ]; then
+    log_warn "No redis-dump.rdb or dump.rdb found in ${src_dir}; skipping Redis restore"
+    return 0
+  fi
+
+  container_id="$(compose_container_id_all redis)"
+  if [ -z "$container_id" ]; then
+    log_warn "Redis container does not exist yet; creating containers before Redis restore"
+    compose_stack "$stack" up --no-start redis >/dev/null
+    container_id="$(compose_container_id_all redis)"
+  fi
+
+  if [ -z "$container_id" ]; then
+    log_warn "Could not locate Redis container; skipping Redis restore"
+    return 0
+  fi
+
+  docker cp "$src_rdb" "${container_id}:/data/dump.rdb"
+  log_info "Restored Redis snapshot from ${src_rdb}"
+}
+
+restore_env_notice() {
+  src_dir="$1"
+  if [ -f "${src_dir}/env.snapshot" ]; then
+    log_warn "Environment snapshot available at ${src_dir}/env.snapshot. Review it and copy to .env manually if needed."
+  fi
+}
+
+new_backup() {
+  ts="$(date -u +%Y%m%d-%H%M%S)"
+  target="${backup_dir}/${ts}"
+  mkdir -p "$target"
+
+  backup_redis "$target"
+  copy_optional_snapshots "$target"
+  backup_sqlite "$target"
+  sync_offsite "$target" "$ts"
+  log_info "Backup written to ${target}"
+}
+
+restore_backup() {
+  src_dir="$(resolve_backup_dir "${1:-}")"
+  log_info "Restoring backup from ${src_dir}"
+  stop_for_restore
+  restore_sqlite "$src_dir"
+  restore_redis "$src_dir"
+  restore_env_notice "$src_dir"
+  log_info "Restarting stack..."
+  compose_up_stack
+  log_info "Restore completed"
 }
 
 resolve_feed_sources() {
@@ -66,30 +343,15 @@ case "$cmd" in
     compose_stack "$stack" logs -f --tail="${SAFE_ROAD_LOG_TAIL:-100}"
     ;;
   backup)
-    ts="$(date -u +%Y%m%dT%H%M%SZ)"
-    target="${backup_dir}/${ts}"
-    mkdir -p "$target"
-    compose_stack "$stack" exec -T redis redis-cli SAVE >/dev/null
-    docker cp "$(compose_stack "$stack" ps -q redis):/data/dump.rdb" "${target}/redis-dump.rdb"
-    if [ -f .env ]; then
-      cp .env "${target}/env.snapshot"
-    fi
-    echo "Backup written to ${target}"
+    new_backup
     ;;
   restore)
-    src="${2:-}"
-    if [ -z "$src" ]; then
-      echo "usage: scripts/safe-road.sh restore /path/to/redis-dump.rdb" >&2
-      exit 2
-    fi
-    compose_stack "$stack" stop redis
-    docker cp "$src" "$(compose_stack "$stack" ps -aq redis):/data/dump.rdb"
-    compose_stack "$stack" start redis
+    restore_backup "${2:-}"
     ;;
   feed-sync)
     sources="$(resolve_feed_sources || true)"
     if [ -z "$sources" ]; then
-      echo "No feed sources configured. Set SAFE_ROAD_AGENT_FEED_SOURCES, SAFE_ROAD_AGENT_FEED_PRESET, or SAFE_ROAD_THREAT_FEED_SOURCE." >&2
+      log_error "No feed sources configured. Set SAFE_ROAD_AGENT_FEED_SOURCES, SAFE_ROAD_AGENT_FEED_PRESET, or SAFE_ROAD_THREAT_FEED_SOURCE."
       exit 2
     fi
     old_ifs="$IFS"
@@ -111,13 +373,16 @@ Commands:
   deploy-dev   Build and start the local developer stack on loopback ports.
   status       Show compose status and loopback health endpoints for SAFE_ROAD_STACK (default: production).
   logs         Follow compose logs for SAFE_ROAD_STACK (default: production).
-  backup       Save Redis RDB and env snapshot under backups/.
-  restore      Restore Redis from a dump.rdb path.
+  backup       Save Redis, SQLite, env, and Caddy snapshots under backups/<timestamp>/.
+  restore      Restore the latest backup directory, or a provided backup directory.
   feed-sync    Sync configured free threat feeds once.
   duckdns      Update DuckDNS record.
 
 Environment:
-  SAFE_ROAD_STACK=production|dev  Choose the stack for status/logs/backup/restore/feed-sync.
+  SAFE_ROAD_STACK=production|dev      Choose the stack for status/logs/backup/restore/feed-sync.
+  SAFE_ROAD_BACKUP_DIR=/path          Override the local backup root.
+  SAFE_ROAD_RCLONE_REMOTE=gdrive:     Optional rclone remote for offsite backup upload.
+  SAFE_ROAD_RCLONE_DEST=safe-road-backups
 USAGE
     ;;
 esac
