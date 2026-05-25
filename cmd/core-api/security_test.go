@@ -68,6 +68,7 @@ func TestLoadRuntimeSecurityProductionAcceptsFileSecrets(t *testing.T) {
 }
 
 func TestLoadRuntimeSecurityLocalGeneratesFallbacks(t *testing.T) {
+	t.Chdir(t.TempDir())
 	t.Setenv("SAFE_ROAD_ENV", "local")
 	t.Setenv("SAFE_ROAD_ADMIN_PASSWORD", "")
 	t.Setenv("SAFE_ROAD_ADMIN_PASSWORD_FILE", "")
@@ -86,5 +87,17 @@ func TestLoadRuntimeSecurityLocalGeneratesFallbacks(t *testing.T) {
 	}
 	if len(security.sessionSecret) == 0 {
 		t.Fatal("expected generated session secret")
+	}
+
+	content, err := os.ReadFile(localAdminSecretsFile)
+	if err != nil {
+		t.Fatalf("expected local admin secrets file: %v", err)
+	}
+	body := string(content)
+	if !strings.Contains(body, "SAFE_ROAD_ADMIN_PASSWORD="+security.adminPassword+"\n") {
+		t.Fatal("expected generated admin password in local secrets file")
+	}
+	if !strings.Contains(body, "SAFE_ROAD_ADMIN_API_KEY="+security.adminAPIKey+"\n") {
+		t.Fatal("expected generated admin api key in local secrets file")
 	}
 }

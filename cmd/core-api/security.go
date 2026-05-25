@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+	"os"
 	"strings"
 
 	"safe-road/internal/auth"
@@ -15,6 +16,8 @@ const (
 	generatedAdminAPIKeyBytes   = 24
 	minAdminPasswordLength      = 12
 	minAdminAPIKeyLength        = 24
+	localAdminSecretsDir        = "tmp"
+	localAdminSecretsFile       = "tmp/local_admin_secrets.txt"
 )
 
 type runtimeSecurity struct {
@@ -52,17 +55,20 @@ func loadRuntimeSecurity() (runtimeSecurity, error) {
 		}, nil
 	}
 
+	generatedAdminPassword := ""
+	generatedAdminAPIKey := ""
+
 	if adminPassword == "" {
 		adminPassword, err = auth.GenerateSecureRandomString(generatedAdminPasswordBytes)
 		if err != nil {
 			return runtimeSecurity{}, fmt.Errorf("generate admin password: %w", err)
 		}
+		generatedAdminPassword = adminPassword
 		logjson.Warn("generated temporary local-only admin password", map[string]any{
 			"service":        "core-api",
 			"config_key":     "SAFE_ROAD_ADMIN_PASSWORD",
 			"generated_only": true,
 		})
-		printLocalAdminSecret("SAFE_ROAD_ADMIN_PASSWORD", adminPassword)
 	} else if err := validateProductionAdminPassword(adminPassword); err != nil {
 		logjson.Warn("admin password validation warning", map[string]any{
 			"service": "core-api",
@@ -75,16 +81,26 @@ func loadRuntimeSecurity() (runtimeSecurity, error) {
 		if err != nil {
 			return runtimeSecurity{}, fmt.Errorf("generate admin API key: %w", err)
 		}
+		generatedAdminAPIKey = adminAPIKey
 		logjson.Warn("generated temporary local-only admin api key", map[string]any{
 			"service":        "core-api",
 			"config_key":     "SAFE_ROAD_ADMIN_API_KEY",
 			"generated_only": true,
 		})
-		printLocalAdminSecret("SAFE_ROAD_ADMIN_API_KEY", adminAPIKey)
 	} else if err := validateProductionAdminAPIKey(adminAPIKey); err != nil {
 		logjson.Warn("admin api key validation warning", map[string]any{
 			"service": "core-api",
 			"error":   err.Error(),
+		})
+	}
+
+	if generatedAdminPassword != "" || generatedAdminAPIKey != "" {
+		if err := writeLocalAdminSecrets(generatedAdminPassword, generatedAdminAPIKey); err != nil {
+			return runtimeSecurity{}, err
+		}
+		logjson.Warn("temporary local-only admin secrets generated and saved to file", map[string]any{
+			"service":      "core-api",
+			"secrets_file": localAdminSecretsFile,
 		})
 	}
 
@@ -95,12 +111,26 @@ func loadRuntimeSecurity() (runtimeSecurity, error) {
 	}, nil
 }
 
-func printLocalAdminSecret(configKey, value string) {
-	fmt.Printf("\n============================================================\n")
-	fmt.Printf("Safe Road local-only admin secret generated\n")
-	fmt.Printf("%s=%s\n", configKey, value)
-	fmt.Printf("Set %s in .env to use a persistent value.\n", configKey)
-	fmt.Printf("============================================================\n\n")
+func writeLocalAdminSecrets(adminPassword, adminAPIKey string) error {
+	var content strings.Builder
+	if adminPassword != "" {
+		content.WriteString("SAFE_ROAD_ADMIN_PASSWORD=")
+		content.WriteString(adminPassword)
+		content.WriteString("\n")
+	}
+	if adminAPIKey != "" {
+		content.WriteString("SAFE_ROAD_ADMIN_API_KEY=")
+		content.WriteString(adminAPIKey)
+		content.WriteString("\n")
+	}
+
+	if err := os.MkdirAll(localAdminSecretsDir, 0o755); err != nil {
+		return fmt.Errorf("create local admin secrets directory: %w", err)
+	}
+	if err := os.WriteFile(localAdminSecretsFile, []byte(content.String()), 0o600); err != nil {
+		return fmt.Errorf("write local admin secrets file: %w", err)
+	}
+	return nil
 }
 
 func validateProductionAdminPassword(password string) error {

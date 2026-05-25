@@ -8,11 +8,17 @@ Tài liệu này tổng hợp kết quả đánh giá an toàn, kiểm toán mã
 
 Dưới đây là 3 lỗi logic và bảo mật cụ thể được phát hiện trong quá trình kiểm toán mã nguồn:
 
-### 1.1. [High] Rò rỉ Thông tin Admin Secret ở Mức INFO trong Log Cục bộ
+### 1.1. [High] Rò rỉ Thông tin Admin Secret Trong Log Cục bộ
 *   **Vị trí mã nguồn:** [cmd/core-api/security.go (dòng 65 & 86)](file:///d:/Go/duan/safe-road/cmd/core-api/security.go#L65-L89)
-*   **Chi tiết vấn đề:** Khi chạy ở chế độ cục bộ (local mode) và không cấu hình biến môi trường `SAFE_ROAD_ADMIN_PASSWORD` hoặc `SAFE_ROAD_ADMIN_API_KEY`, hệ thống tự sinh ngẫu nhiên chuỗi bảo mật. Tuy nhiên, mã nguồn lại sử dụng logger có cấu trúc `logjson.Info` để in thẳng mật khẩu và API key dạng plaintext ra log tiêu chuẩn dưới key `"value"`.
-*   **Hậu quả:** Toàn bộ mật khẩu admin tối cao sẽ bị rò rỉ vào hệ thống lưu trữ log của container (`docker logs`) hoặc các hệ thống thu thập log tập trung (như Grafana Loki, Elasticsearch). Nếu người vận hành quên cấu hình chế độ sản xuất (`SAFE_ROAD_ENV=production`) trên VPS, các mật khẩu tự sinh cực kỳ nhạy cảm này sẽ phơi bày công khai.
-*   **Đề xuất khắc phục:** Chỉ in các thông tin mật khẩu tự sinh này trực tiếp ra console tiêu chuẩn (`os.Stdout`) dạng banner khởi động một lần duy nhất nếu chạy trong terminal tương tác (interactive TTY), không truyền qua logger JSON ghi log có cấu trúc.
+*   **Chi tiết vấn đề:** Khi chạy ở chế độ cục bộ (local mode) và không cấu hình biến môi trường `SAFE_ROAD_ADMIN_PASSWORD` hoặc `SAFE_ROAD_ADMIN_API_KEY`, hệ thống tự sinh ngẫu nhiên chuỗi bảo mật.
+*   **Hậu quả:** 
+    *   *Trước đây:* In ra cấu trúc log JSON (`logjson.Info`) của container.
+    *   *Hiện tại:* Đã chuyển sang `fmt.Printf` (in ra `stdout` chung). Tuy nhiên, `stdout`/`stderr` của tiến trình vẫn bị Docker daemon thu thập (`docker logs`) hoặc systemd ghi nhận (`journalctl`), do đó các secret vẫn bị rò rỉ dưới dạng bản rõ trong luồng log stream chung.
+*   **Đề xuất khắc phục:** 
+    *   Tuyệt đối không in giá trị secret thô ra bất kỳ luồng đầu ra tiêu chuẩn nào (`stdout`/`stderr`).
+    *   Ghi toàn bộ thông tin secret tự sinh cục bộ vào một tệp tạm nằm trong danh mục bị bỏ qua bởi Git (ví dụ: `tmp/local_admin_secrets.txt` hoặc `ops/secrets/local_admin_secrets.txt`, cả hai thư mục này đã được định nghĩa trong `.gitignore`).
+    *   Thiết lập quyền truy cập tệp an toàn (chmod `0600` - chỉ chủ sở hữu tiến trình được đọc/ghi).
+    *   Chỉ ghi nhận một dòng log cảnh báo dạng Warn thông báo cho nhà phát triển biết tệp chứa secret tạm thời đã được ghi tại đường dẫn đó (ví dụ: *"Admin secrets written to tmp/local_admin_secrets.txt"*).
 
 ---
 
