@@ -145,23 +145,16 @@ func main() {
 
 		var cert tls.Certificate
 		var certErr error
-		if certFile != "" && keyFile != "" {
+		if certFile != "" || keyFile != "" {
 			cert, certErr = tls.LoadX509KeyPair(certFile, keyFile)
 			if certErr != nil {
-				logjson.Warn("failed to load TLS keys; falling back to self-signed cert", map[string]any{
+				logjson.Error("failed to load configured TLS keys", map[string]any{
 					"service":   "dns-resolver",
 					"cert_file": certFile,
 					"key_file":  keyFile,
 					"error":     certErr.Error(),
 				})
-				cert, certErr = generateSelfSignedCert()
-				if certErr != nil {
-					logjson.Error("failed to generate self-signed cert", map[string]any{
-						"service": "dns-resolver",
-						"error":   certErr.Error(),
-					})
-					os.Exit(1)
-				}
+				os.Exit(1)
 			}
 		} else {
 			logjson.Warn("TLS key files not configured; generating temporary self-signed cert", map[string]any{
@@ -499,11 +492,16 @@ func logCacheStatus(service string, riskService *risk.Service) {
 
 func logRequests(service string, next http.Handler, metrics *observability.Registry) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		panicObserved := false
+		ctx := context.WithValue(r.Context(), serve.ObservedPanicKey, &panicObserved)
+		r = r.WithContext(ctx)
 		started := time.Now()
 		recorder := &statusLoggingResponseWriter{ResponseWriter: w, statusCode: http.StatusOK}
 		next.ServeHTTP(recorder, r)
-		if metrics != nil && r.Context().Value(serve.ObservedPanicKey) == nil {
-			metrics.Observe(r.Method, r.URL.Path, recorder.statusCode, recorder.bytesWritten, time.Since(started))
+		if metrics != nil {
+			if p, ok := r.Context().Value(serve.ObservedPanicKey).(*bool); !ok || !*p {
+				metrics.Observe(r.Method, r.URL.Path, recorder.statusCode, recorder.bytesWritten, time.Since(started))
+			}
 		}
 		clientInfo := extractClientInfo(r)
 		logjson.Info("http request", map[string]any{

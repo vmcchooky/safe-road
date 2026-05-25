@@ -62,10 +62,7 @@ func loadRuntimeSecurity() (runtimeSecurity, error) {
 			"config_key":     "SAFE_ROAD_ADMIN_PASSWORD",
 			"generated_only": true,
 		})
-		logjson.Info("generated local admin password", map[string]any{
-			"service": "core-api",
-			"value":   adminPassword,
-		})
+		printLocalAdminSecret("SAFE_ROAD_ADMIN_PASSWORD", adminPassword)
 	} else if err := validateProductionAdminPassword(adminPassword); err != nil {
 		logjson.Warn("admin password validation warning", map[string]any{
 			"service": "core-api",
@@ -83,10 +80,7 @@ func loadRuntimeSecurity() (runtimeSecurity, error) {
 			"config_key":     "SAFE_ROAD_ADMIN_API_KEY",
 			"generated_only": true,
 		})
-		logjson.Info("generated local admin api key", map[string]any{
-			"service": "core-api",
-			"value":   adminAPIKey,
-		})
+		printLocalAdminSecret("SAFE_ROAD_ADMIN_API_KEY", adminAPIKey)
 	} else if err := validateProductionAdminAPIKey(adminAPIKey); err != nil {
 		logjson.Warn("admin api key validation warning", map[string]any{
 			"service": "core-api",
@@ -99,6 +93,14 @@ func loadRuntimeSecurity() (runtimeSecurity, error) {
 		adminPassword: adminPassword,
 		adminAPIKey:   adminAPIKey,
 	}, nil
+}
+
+func printLocalAdminSecret(configKey, value string) {
+	fmt.Printf("\n============================================================\n")
+	fmt.Printf("Safe Road local-only admin secret generated\n")
+	fmt.Printf("%s=%s\n", configKey, value)
+	fmt.Printf("Set %s in .env to use a persistent value.\n", configKey)
+	fmt.Printf("============================================================\n\n")
 }
 
 func validateProductionAdminPassword(password string) error {

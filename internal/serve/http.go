@@ -67,9 +67,10 @@ func Recovery(next http.Handler, obs MetricsObserver) http.Handler {
 					"stack":      string(stack[:length]),
 				})
 
-				// 2. Thiết lập trạng thái context là đã xử lý panic để tránh ghi nhận trùng lặp ở logRequests
-				ctx := context.WithValue(r.Context(), ObservedPanicKey, true)
-				r = r.WithContext(ctx)
+				// 2. Đánh dấu panic đã được ghi nhận để tránh metrics trùng lặp ở logRequests.
+				if p, ok := r.Context().Value(ObservedPanicKey).(*bool); ok {
+					*p = true
+				}
 
 				// 3. Tự động phát hiện định dạng trả về dựa trên header Accept hoặc URL Path
 				accept := r.Header.Get("Accept")

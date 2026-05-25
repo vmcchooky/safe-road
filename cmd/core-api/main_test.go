@@ -162,6 +162,31 @@ func TestMetricsEndpointHTTP(t *testing.T) {
 	}
 }
 
+func TestLogRequestsSkipsMetricsAfterRecoveredPanic(t *testing.T) {
+	metrics := observability.NewRegistry()
+	panicHandler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		panic("boom")
+	})
+	handler := serve.WithRequestID(logRequests("core-api", serve.Recovery(panicHandler, metrics), metrics))
+
+	recorder := httptest.NewRecorder()
+	request := httptest.NewRequest(http.MethodGet, "/panic", nil)
+
+	handler.ServeHTTP(recorder, request)
+
+	if recorder.Code != http.StatusInternalServerError {
+		t.Fatalf("expected 500, got %d", recorder.Code)
+	}
+	snapshot := metrics.Snapshot()
+	summary, ok := snapshot.RequestSummary["GET /panic 500"]
+	if !ok {
+		t.Fatalf("expected panic request metric, got %#v", snapshot.RequestSummary)
+	}
+	if summary.Count != 1 {
+		t.Fatalf("expected panic request metric to be observed once, got %d", summary.Count)
+	}
+}
+
 func TestBlockPageHandlerRendersBlockedContext(t *testing.T) {
 	app := &app{
 		risk:           risk.NewService(risk.Options{AnalysisConfig: config.DefaultAnalysisConfig(), RedisTimeout: 10 * time.Millisecond}),

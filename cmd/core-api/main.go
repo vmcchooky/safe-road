@@ -413,11 +413,16 @@ func (a *app) feedStatus(ctx context.Context) feed.StatusSummary {
 
 func logRequests(service string, next http.Handler, metrics *observability.Registry) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		panicObserved := false
+		ctx := context.WithValue(r.Context(), serve.ObservedPanicKey, &panicObserved)
+		r = r.WithContext(ctx)
 		started := time.Now()
 		recorder := &statusLoggingResponseWriter{ResponseWriter: w, statusCode: http.StatusOK}
 		next.ServeHTTP(recorder, r)
-		if metrics != nil && r.Context().Value(serve.ObservedPanicKey) == nil {
-			metrics.Observe(r.Method, r.URL.Path, recorder.statusCode, recorder.bytesWritten, time.Since(started))
+		if metrics != nil {
+			if p, ok := r.Context().Value(serve.ObservedPanicKey).(*bool); !ok || !*p {
+				metrics.Observe(r.Method, r.URL.Path, recorder.statusCode, recorder.bytesWritten, time.Since(started))
+			}
 		}
 		clientInfo := extractClientInfo(r)
 		logjson.Info("http request", map[string]any{
