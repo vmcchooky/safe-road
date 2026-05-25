@@ -214,6 +214,108 @@ func TestDoHUpstreamFailureCounter(t *testing.T) {
 	}
 }
 
+func TestBlockedDNSResponseStrategies(t *testing.T) {
+	tests := []struct {
+		name          string
+		strategy      string
+		qtype         uint16
+		expectedRcode int
+		expectedIP    string
+		expectedType  uint16
+	}{
+		{
+			name:          "sinkhole A returns configured block page IP",
+			strategy:      blockStrategySinkhole,
+			qtype:         dns.TypeA,
+			expectedRcode: dns.RcodeSuccess,
+			expectedIP:    "203.0.113.10",
+			expectedType:  dns.TypeA,
+		},
+		{
+			name:          "nxdomain returns name error without answers",
+			strategy:      blockStrategyNXDomain,
+			qtype:         dns.TypeA,
+			expectedRcode: dns.RcodeNameError,
+		},
+		{
+			name:          "refused returns refused without answers",
+			strategy:      blockStrategyRefused,
+			qtype:         dns.TypeA,
+			expectedRcode: dns.RcodeRefused,
+		},
+		{
+			name:          "nullip A returns IPv4 null address",
+			strategy:      blockStrategyNullIP,
+			qtype:         dns.TypeA,
+			expectedRcode: dns.RcodeSuccess,
+			expectedIP:    "0.0.0.0",
+			expectedType:  dns.TypeA,
+		},
+		{
+			name:          "nullip AAAA returns IPv6 null address",
+			strategy:      blockStrategyNullIP,
+			qtype:         dns.TypeAAAA,
+			expectedRcode: dns.RcodeSuccess,
+			expectedIP:    "::",
+			expectedType:  dns.TypeAAAA,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			app := &app{
+				blockPageIP:   "203.0.113.10",
+				blockStrategy: tt.strategy,
+				dnsTTL:        60,
+			}
+			query := new(dns.Msg)
+			query.SetQuestion(dns.Fqdn("blocked.example"), tt.qtype)
+
+			wire, err := app.blockedDNSResponse(query)
+			if err != nil {
+				t.Fatalf("blockedDNSResponse failed: %v", err)
+			}
+
+			response := new(dns.Msg)
+			if err := response.Unpack(wire); err != nil {
+				t.Fatalf("unpack blocked response: %v", err)
+			}
+
+			if response.Rcode != tt.expectedRcode {
+				t.Fatalf("expected rcode %s, got %s", dns.RcodeToString[tt.expectedRcode], dns.RcodeToString[response.Rcode])
+			}
+			if tt.expectedIP == "" {
+				if len(response.Answer) != 0 {
+					t.Fatalf("expected no answers, got %d", len(response.Answer))
+				}
+				return
+			}
+			if len(response.Answer) != 1 {
+				t.Fatalf("expected 1 answer, got %d", len(response.Answer))
+			}
+
+			switch tt.expectedType {
+			case dns.TypeA:
+				record, ok := response.Answer[0].(*dns.A)
+				if !ok {
+					t.Fatalf("expected A answer, got %T", response.Answer[0])
+				}
+				if record.A.String() != tt.expectedIP {
+					t.Fatalf("expected A %s, got %s", tt.expectedIP, record.A.String())
+				}
+			case dns.TypeAAAA:
+				record, ok := response.Answer[0].(*dns.AAAA)
+				if !ok {
+					t.Fatalf("expected AAAA answer, got %T", response.Answer[0])
+				}
+				if record.AAAA.String() != tt.expectedIP {
+					t.Fatalf("expected AAAA %s, got %s", tt.expectedIP, record.AAAA.String())
+				}
+			}
+		})
+	}
+}
+
 func TestResolverClientGroupPolicy(t *testing.T) {
 	dbPath := filepath.Join(t.TempDir(), "test-resolver.db")
 	storeDB, err := store.New(dbPath, 30)

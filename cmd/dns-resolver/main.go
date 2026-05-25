@@ -47,9 +47,17 @@ type app struct {
 	upstreamDoHURL string
 	upstreamClient *http.Client
 	blockPageIP    string
+	blockStrategy  string
 	dnsTTL         uint32
 	dotLimiter     *ratelimit.Limiter
 }
+
+const (
+	blockStrategySinkhole = "sinkhole"
+	blockStrategyNXDomain = "nxdomain"
+	blockStrategyRefused  = "refused"
+	blockStrategyNullIP   = "nullip"
+)
 
 func main() {
 	addr := config.String("SAFE_ROAD_DNS_RESOLVER_ADDR", ":8081")
@@ -64,6 +72,16 @@ func main() {
 		os.Exit(1)
 	}
 
+	blockStrategy := strings.ToLower(strings.TrimSpace(config.String("SAFE_ROAD_DNS_BLOCK_STRATEGY", blockStrategySinkhole)))
+	if !validBlockStrategy(blockStrategy) {
+		logjson.Error("invalid SAFE_ROAD_DNS_BLOCK_STRATEGY", map[string]any{
+			"service": "dns-resolver",
+			"value":   blockStrategy,
+			"allowed": []string{blockStrategySinkhole, blockStrategyNXDomain, blockStrategyRefused, blockStrategyNullIP},
+		})
+		os.Exit(1)
+	}
+
 	resolver := &app{
 		risk:           risk.NewServiceFromEnv(),
 		metrics:        observability.NewRegistry(),
@@ -71,6 +89,7 @@ func main() {
 		upstreamDoHURL: config.String("SAFE_ROAD_UPSTREAM_DOH_URL", "https://cloudflare-dns.com/dns-query"),
 		upstreamClient: &http.Client{Timeout: config.DurationMillis("SAFE_ROAD_UPSTREAM_DOH_TIMEOUT_MS", 3*time.Second)},
 		blockPageIP:    config.String("SAFE_ROAD_BLOCK_PAGE_IP", "127.0.0.1"),
+		blockStrategy:  blockStrategy,
 		dnsTTL:         uint32(ttlVal), // #nosec G115 -- bounds validated above
 	}
 	defer func() {
@@ -271,6 +290,15 @@ func healthHandler(service string) http.HandlerFunc {
 	}
 }
 
+func validBlockStrategy(strategy string) bool {
+	switch strategy {
+	case blockStrategySinkhole, blockStrategyNXDomain, blockStrategyRefused, blockStrategyNullIP:
+		return true
+	default:
+		return false
+	}
+}
+
 func (a *app) statusHandler(w http.ResponseWriter, r *http.Request) {
 	if r.URL.Path != "/" {
 		http.NotFound(w, r)
@@ -426,34 +454,10 @@ func (a *app) forwardDoH(ctx context.Context, wire []byte) ([]byte, error) {
 }
 
 func (a *app) blockedDNSResponse(query *dns.Msg) ([]byte, error) {
-	response := new(dns.Msg)
-	response.SetReply(query)
-	response.Authoritative = true
-	response.RecursionAvailable = true
-
-	for _, question := range query.Question {
-		switch question.Qtype {
-		case dns.TypeA:
-			ip := net.ParseIP(a.blockPageIP).To4()
-			if ip == nil {
-				continue
-			}
-			response.Answer = append(response.Answer, &dns.A{
-				Hdr: dns.RR_Header{Name: question.Name, Rrtype: dns.TypeA, Class: question.Qclass, Ttl: a.dnsTTL},
-				A:   ip,
-			})
-		case dns.TypeAAAA:
-			ip := net.ParseIP(a.blockPageIP).To16()
-			if ip == nil || ip.To4() != nil {
-				continue
-			}
-			response.Answer = append(response.Answer, &dns.AAAA{
-				Hdr:  dns.RR_Header{Name: question.Name, Rrtype: dns.TypeAAAA, Class: question.Qclass, Ttl: a.dnsTTL},
-				AAAA: ip,
-			})
-		}
+	response, err := a.blockedDNSMessage(query)
+	if err != nil {
+		return nil, err
 	}
-
 	return response.Pack()
 }
 
@@ -713,17 +717,26 @@ func (a *app) dotHandler(w dns.ResponseWriter, r *dns.Msg) {
 	_ = w.WriteMsg(responseMsg)
 }
 
-// blockedDNSMessage tạo message block cụ thể cho DoT trả về A/AAAA trỏ về IP Block Page
+// blockedDNSMessage tạo message block cụ thể cho DoT trả về theo strategy đã cấu hình.
 func (a *app) blockedDNSMessage(query *dns.Msg) (*dns.Msg, error) {
 	response := new(dns.Msg)
 	response.SetReply(query)
 	response.Authoritative = true
 	response.RecursionAvailable = true
 
+	switch a.effectiveBlockStrategy() {
+	case blockStrategyNXDomain:
+		response.Rcode = dns.RcodeNameError
+		return response, nil
+	case blockStrategyRefused:
+		response.Rcode = dns.RcodeRefused
+		return response, nil
+	}
+
 	for _, question := range query.Question {
 		switch question.Qtype {
 		case dns.TypeA:
-			ip := net.ParseIP(a.blockPageIP).To4()
+			ip := a.blockIPv4()
 			if ip == nil {
 				continue
 			}
@@ -732,8 +745,8 @@ func (a *app) blockedDNSMessage(query *dns.Msg) (*dns.Msg, error) {
 				A:   ip,
 			})
 		case dns.TypeAAAA:
-			ip := net.ParseIP(a.blockPageIP).To16()
-			if ip == nil || ip.To4() != nil {
+			ip := a.blockIPv6()
+			if ip == nil {
 				continue
 			}
 			response.Answer = append(response.Answer, &dns.AAAA{
@@ -744,6 +757,27 @@ func (a *app) blockedDNSMessage(query *dns.Msg) (*dns.Msg, error) {
 	}
 
 	return response, nil
+}
+
+func (a *app) effectiveBlockStrategy() string {
+	if a.blockStrategy == "" {
+		return blockStrategySinkhole
+	}
+	return a.blockStrategy
+}
+
+func (a *app) blockIPv4() net.IP {
+	if a.effectiveBlockStrategy() == blockStrategyNullIP {
+		return net.IPv4(0, 0, 0, 0)
+	}
+	return net.ParseIP(a.blockPageIP).To4()
+}
+
+func (a *app) blockIPv6() net.IP {
+	if a.effectiveBlockStrategy() == blockStrategyNullIP {
+		return net.IPv6zero
+	}
+	return net.ParseIP(a.blockPageIP).To16()
 }
 
 // sendServfail gửi phản hồi lỗi DNS ServFail (Server Failure) an toàn cho DoT client
