@@ -17,6 +17,7 @@ import (
 	"safe-road/internal/cache"
 	"safe-road/internal/config"
 	"safe-road/internal/feed"
+	"safe-road/internal/osint"
 	"safe-road/internal/store"
 )
 
@@ -154,6 +155,131 @@ func TestFeedRevisionInvalidatesCachedAnalysis(t *testing.T) {
 	}
 	if fourth.Verdict != analysis.VerdictMalicious {
 		t.Fatalf("expected cached malicious verdict, got %s", fourth.Verdict)
+	}
+}
+
+func TestAnalysisRevisionInvalidatesLegacySafeCache(t *testing.T) {
+	service, closeService := newTestServiceWithRedis(t)
+	defer closeService()
+
+	cacheKey := "safe-road:analysis:dichvucong-vn.com"
+	if err := service.redis.SetJSON(context.Background(), cacheKey, analysis.Result{
+		Domain:     "dichvucong-vn.com",
+		Verdict:    analysis.VerdictSafe,
+		Confidence: 0.45,
+		Score:      0,
+		Reasons:    []string{"legacy cached safe"},
+		Category:   "uncategorized",
+	}, time.Hour); err != nil {
+		t.Fatal(err)
+	}
+
+	result := service.Analyze(context.Background(), "dichvucong-vn.com", ClientInfo{})
+	if result.CacheHit {
+		t.Fatal("expected legacy cached safe result to be ignored after analysis revision change")
+	}
+	if result.Verdict != analysis.VerdictMalicious {
+		t.Fatalf("expected re-analysis to mark malicious, got %s with reasons %v", result.Verdict, result.Reasons)
+	}
+}
+
+func TestPolicyBlocksVietnamPublicServiceAbuseByDefault(t *testing.T) {
+	service := NewService(Options{
+		AnalysisConfig: config.DefaultAnalysisConfig(),
+		RedisTimeout:   10 * time.Millisecond,
+		TTLAllowed:     time.Hour,
+		TTLSuspicious:  time.Hour,
+		TTLBlocked:     time.Hour,
+		RecentLimit:    10,
+	})
+
+	policy := service.Policy(context.Background(), "dichvucong-vn.com", ClientInfo{})
+	if policy.Policy != "block" {
+		t.Fatalf("expected default policy to block dichvucong-vn.com, got %s", policy.Policy)
+	}
+	if policy.Result.Verdict != analysis.VerdictMalicious {
+		t.Fatalf("expected malicious verdict, got %s", policy.Result.Verdict)
+	}
+}
+
+func TestAnalyzeEscalatesWithOSINTEvidence(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`<title>Cảnh báo</title>baohiem-online.com là trang giả mạo, lừa đảo.`))
+	}))
+	defer server.Close()
+
+	service := NewService(Options{
+		AnalysisConfig: config.DefaultAnalysisConfig(),
+		RedisTimeout:   10 * time.Millisecond,
+		TTLAllowed:     time.Hour,
+		TTLSuspicious:  time.Hour,
+		TTLBlocked:     time.Hour,
+		RecentLimit:    10,
+		OSINT: osint.NewService(osint.Options{
+			Enabled:             true,
+			Sources:             []string{server.URL},
+			TrustedDomains:      []string{server.URL},
+			AllowPrivateSources: true,
+			CacheTTL:            time.Hour,
+		}),
+	})
+
+	result := service.AnalyzeWithOptions(context.Background(), "baohiem-online.com", ClientInfo{}, AnalyzeOptions{IncludeEvidence: true})
+	if result.Verdict != analysis.VerdictMalicious {
+		t.Fatalf("expected osint evidence to escalate to malicious, got %s with reasons %v", result.Verdict, result.Reasons)
+	}
+	if result.Category != "phishing" {
+		t.Fatalf("expected phishing category, got %s", result.Category)
+	}
+	if len(result.Evidence) == 0 {
+		t.Fatal("expected evidence in analysis response")
+	}
+}
+
+func TestPolicyUsesCachedOSINTEvidenceOnly(t *testing.T) {
+	sourceHits := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		sourceHits++
+		_, _ = w.Write([]byte(`baohiem-online.com là website giả mạo, lừa đảo.`))
+	}))
+	defer server.Close()
+
+	service := NewService(Options{
+		AnalysisConfig: config.DefaultAnalysisConfig(),
+		RedisTimeout:   10 * time.Millisecond,
+		TTLAllowed:     time.Hour,
+		TTLSuspicious:  time.Hour,
+		TTLBlocked:     time.Hour,
+		RecentLimit:    10,
+		OSINT: osint.NewService(osint.Options{
+			Enabled:             true,
+			Sources:             []string{server.URL},
+			TrustedDomains:      []string{server.URL},
+			AllowPrivateSources: true,
+			CacheTTL:            time.Hour,
+		}),
+	})
+
+	firstPolicy := service.Policy(context.Background(), "baohiem-online.com", ClientInfo{})
+	if sourceHits != 0 {
+		t.Fatalf("policy must not perform live osint lookup, got %d source hits", sourceHits)
+	}
+	if firstPolicy.Policy != "allow" {
+		t.Fatalf("expected first policy to allow without cached evidence, got %s", firstPolicy.Policy)
+	}
+
+	analysisResult := service.Analyze(context.Background(), "baohiem-online.com", ClientInfo{})
+	if analysisResult.Verdict != analysis.VerdictMalicious {
+		t.Fatalf("expected analyze to cache malicious osint result, got %s", analysisResult.Verdict)
+	}
+
+	sourceHits = 0
+	secondPolicy := service.Policy(context.Background(), "baohiem-online.com", ClientInfo{})
+	if sourceHits != 0 {
+		t.Fatalf("policy must use cached evidence only, got %d source hits", sourceHits)
+	}
+	if secondPolicy.Policy != "block" {
+		t.Fatalf("expected policy to block cached osint malicious verdict, got %s", secondPolicy.Policy)
 	}
 }
 

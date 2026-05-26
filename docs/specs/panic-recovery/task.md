@@ -25,3 +25,7 @@ Dưới đây là danh sách các nhiệm vụ cụ thể đã được thực h
 - `[x]` **Bước 5: Kiểm tra và Nghiệm thu toàn hệ thống**
   - `[x]` Chạy toàn bộ test suite với Race Detector: `go test -race ./...`.
   - `[x]` Biên dịch chạy thử nghiệm toàn bộ hệ thống: `go build ./...`.
+
+- `[x]` **Bước 6: Đồng bộ Fix Double Metrics Observation**
+  - `[x]` Cập nhật `logRequests` trong `cmd/core-api/main.go` và `cmd/dns-resolver/main.go` để tạo `panicObserved := false` và truyền con trỏ `*bool` qua context bằng `serve.ObservedPanicKey`.
+  - `[x]` Cập nhật `serve.Recovery` để set `*panicObserved = true` sau khi observe lỗi 500, đảm bảo request panic chỉ được ghi metrics một lần.

@@ -24,7 +24,7 @@
 ## 📋 Giai đoạn 3: Goroutine & Graceful Shutdown
 - [x] Cập nhật hàm `main()` trong `cmd/dns-resolver/main.go`:
   - Khởi tạo `dotLimiter` nếu rate limiting được enable.
-  - Tải chứng chỉ thực tế hoặc tự động sinh self-signed fallback.
+  - Tải chứng chỉ thực tế khi được cấu hình, hoặc tự động sinh self-signed fallback khi không cấu hình cert/key.
   - Khởi chạy HTTP Server (DoH) và DoT Server song song trên các goroutine.
   - Bắt tín hiệu SIGINT/SIGTERM từ hệ điều hành, thực hiện tắt đồng thời cả hai server bằng `server.Shutdown` và `dotServer.ShutdownContext` một cách an toàn.
 
@@ -57,3 +57,9 @@
 - [x] Cập nhật & Đồng bộ tài liệu lưu vết:
   - [x] Cập nhật báo cáo `walkthrough.md` trong thư mục App Data.
   - [x] Đồng bộ hóa tài liệu `walkthrough.md` sang `/docs/specs/dot-support/` để lưu giữ tính bày bản của hệ thống.
+
+## 📋 Giai đoạn 7: Đồng bộ Production TLS & DNS Blocking Strategy
+- [x] Thêm fail-fast startup khi `SAFE_ROAD_DNS_DOT_CERT_FILE` hoặc `SAFE_ROAD_DNS_DOT_KEY_FILE` được cấu hình nhưng `tls.LoadX509KeyPair` thất bại.
+- [x] Giữ fallback self-signed certificate chỉ cho trường hợp local/dev không cấu hình cert/key.
+- [x] Thêm `SAFE_ROAD_DNS_BLOCK_STRATEGY` với bốn chế độ: `sinkhole`, `nxdomain`, `refused`, và `nullip`.
+- [x] Bổ sung kiểm thử `TestBlockedDNSResponseStrategies` cho các chiến lược chặn DNS.

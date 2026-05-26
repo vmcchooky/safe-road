@@ -83,7 +83,12 @@ The production edge now supports two block-page flows:
 - Plain HTTP sinkhole requests for arbitrary blocked domains are rewritten by Caddy to `/block` and rendered by `core-api`.
 - Canonical HTTPS access is available at `https://$SAFE_ROAD_PUBLIC_HOST/block?domain=...`.
 
-Direct HTTPS access to an arbitrary blocked third-party domain will still hit a browser certificate warning before any block page can render. That is an expected TLS hostname-validation limit, not an application bug.
+Choose `SAFE_ROAD_DNS_BLOCK_STRATEGY` based on the desired user experience:
+
+- `sinkhole` returns `SAFE_ROAD_BLOCK_PAGE_IP` for blocked A/AAAA answers and enables the HTTP block-page flow.
+- `nxdomain`, `refused`, and `nullip` avoid arbitrary-domain HTTPS certificate mismatch warnings by failing the DNS lookup instead of sending browsers to the block-page IP.
+
+Direct HTTPS access to an arbitrary blocked third-party domain will still hit a browser certificate warning before any block page can render when `sinkhole` is selected. That is an expected TLS hostname-validation limit, not an application bug.
 
 ## DuckDNS
 

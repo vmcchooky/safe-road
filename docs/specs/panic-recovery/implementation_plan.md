@@ -62,6 +62,7 @@ type MetricsObserver interface {
 #### [MODIFY] [main.go](file:///d:/Go/duan/safe-road/cmd/core-api/main.go)
 *   Tích hợp `serve.Recovery` bọc quanh router chính (`mux` hoặc `tiered.Wrap(mux)`) ngay bên dưới middleware ghi log request (`logRequests`).
 *   Đảm bảo `logRequests` bọc ngoài cùng để nó có thể ghi nhận chính xác mã lỗi `500` được phục hồi từ `Recovery` middleware.
+*   Truyền một con trỏ `*bool` qua context bằng `serve.ObservedPanicKey` để `Recovery` có thể báo ngược cho `logRequests` rằng lỗi panic đã được observe, tránh ghi metrics trùng lặp.
 
 ---
 
@@ -69,6 +70,7 @@ type MetricsObserver interface {
 
 #### [MODIFY] [main.go](file:///d:/Go/duan/safe-road/cmd/dns-resolver/main.go)
 *   Tương tự như `core-api`, tích hợp `serve.Recovery` bọc quanh luồng HTTP handler của DNS-over-HTTPS (DoH).
+*   Áp dụng cùng mẫu `*bool` mutable marker trong `logRequests` để DoH panic không bị observe hai lần.
 
 ---
 

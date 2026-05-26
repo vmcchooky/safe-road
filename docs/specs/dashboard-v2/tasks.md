@@ -1,6 +1,6 @@
 # Tasks: Admin Dashboard v2
 
-Synced with repository state on 2026-05-21. Code-backed items are checked; manual browser verification remains open until recorded.
+Synced with repository state on 2026-05-26. Code-backed items are checked; remaining open items are manual browser/mobile verification only.
 
 ## Phase 1: Tab Navigation & Layout Restructuring
 

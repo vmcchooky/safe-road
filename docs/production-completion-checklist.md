@@ -57,9 +57,9 @@ Goal: expose only the intended production surface to the internet.
 - `[x]` DuckDNS update script and cron example exist.
 - `[x]` DoH can be served publicly on `443` through Caddy at `/dns-query`.
 - `[x]` DoT can be published on `853`.
-- `[~]` Repeatable public-edge smoke scripts exist, but a real-VPS execution record is not captured in-repo yet.
+- `[x]` Repeatable public-edge checks exist through audited `scripts/check-production-ports.sh` and `scripts/public-edge-smoke.sh`.
 - `[x]` Lock down host exposure of internal ports `8080` and `8081` in production. Production Compose binds both to `127.0.0.1` only.
-- `[!]` Confirm firewall/security group only allows SSH, `80`, `443`, and `853` for production.
+- `[~]` Firewall/security-group validation is scripted for SSH, `80`, `443`, and `853`; each real environment still needs its execution record captured.
 - `[x]` Decide how DoT receives a trusted certificate in production. Production Compose mounts a dedicated certificate directory and the renewal runbook documents the export process.
 
 Steps:
@@ -120,13 +120,14 @@ Goal: blocked users see a clear page instead of only receiving a block IP.
 - `[!]` Set `SAFE_ROAD_BLOCK_PAGE_IP` to the real public block-page IP in the target production environment. The repo default stays loopback for local development.
 - `[x]` Include enough context on the page: blocked domain, requested path, category/reason when available, and report path.
 - `[x]` Add false-positive reporting flow and operator review path.
+- `[x]` Add configurable DNS blocking strategies: `sinkhole`, `nxdomain`, `refused`, and `nullip`, so operators can choose block-page behavior or avoid HTTPS certificate mismatch warnings.
 
 Steps:
 
 1. Add lightweight static block page assets.
 2. Add Caddy route or `core-api` route for the block page.
-3. Update DNS blocking config to resolve blocked domains to that page.
-4. Test HTTP and HTTPS behavior for a blocked domain. HTTP sinkhole is supported directly; HTTPS for arbitrary third-party blocked domains still has the normal certificate-mismatch limitation.
+3. Update DNS blocking config to resolve blocked domains to that page when using `sinkhole`.
+4. Select the production DNS blocking strategy. Use `sinkhole` for HTTP block-page UX, or `nxdomain`, `refused`, or `nullip` when avoiding arbitrary-domain HTTPS certificate mismatch warnings is more important.
 5. Add a false-positive workflow for admins.
 
 ## 6. Observability, Logging, And Alerting
@@ -158,8 +159,8 @@ Goal: prove data can be restored, not just backed up.
 - `[x]` Redis backup and restore scripts exist.
 - `[x]` Linux cron examples exist.
 - `[x]` Logrotate config exists.
-- `[~]` Offsite backup via `rclone` is mentioned in SRS/OPEX docs but not implemented in scripts.
-- `[ ]` Add `rclone` offsite backup for Redis dump, `.env` snapshot, SQLite DB, and critical config.
+- `[x]` Offsite backup via `rclone` is mentioned in SRS/OPEX docs and implemented in both Linux and PowerShell helper scripts.
+- `[x]` Add `rclone` offsite backup for Redis dump, `.env` snapshot, SQLite DB, and critical config including Caddy config.
 - `[ ]` Add encrypted backup option or document secrets handling.
 - `[ ]` Add scheduled restore drill.
 - `[ ]` Define Recovery Time Objective and Recovery Point Objective.
@@ -178,7 +179,7 @@ Goal: prove the system meets the target environment, not only local benchmarks.
 
 - `[x]` Local Go benchmarks exist.
 - `[~]` Local benchmark file explicitly says it does not prove 500 qps cache-hit / 50 qps miss on target VPS.
-- `[ ]` Add HTTP/DoH load test script for cache hit and cache miss paths.
+- `[x]` Add HTTP/DoH load test script for cache hit and cache miss paths. Implemented as `cmd/load-test`.
 - `[ ]` Run benchmark on the chosen VPS class.
 - `[ ]` Benchmark with Redis enabled, DoH through Caddy, TLS/WHOIS enrichment enabled, and AI mode explicitly selected.
 - `[ ]` Record CPU, memory, latency percentiles, error rate, and cache hit rate.
@@ -216,7 +217,7 @@ Goal: make the product operationally useful, not just technically deployable.
 
 - `[x]` Admin dashboard exists with analysis, telemetry, overrides, system status, agent panel, and client/group controls.
 - `[x]` Agent workflow exists for audit, feed sync, alerting, and whitelist update.
-- `[~]` Dashboard and agent task checklists in `docs/specs/` appear stale and should be reconciled with current code.
+- `[x]` Dashboard and agent task checklists in `docs/specs/` were reviewed; remaining open items are manual QA or environment smoke checks, not stale implementation tasks.
 - `[ ]` Add manual QA checklist for dashboard workflows on desktop and mobile.
 - `[ ]` Add release notes or changelog process.
 - `[ ]` Add operator onboarding guide: first login, first feed sync, first override, first backup, first restore.
@@ -237,12 +238,14 @@ Goal: make deployments repeatable and reversible.
 - `[x]` Compose deploy helper exists.
 - `[x]` Health checks exist.
 - `[~]` Production deploy runbook exists, but release gating is not formalized.
+- `[x]` Production ports validation check exists through `scripts/check-production-ports.sh`.
+- `[x]` Public edge smoke check exists through `scripts/public-edge-smoke.sh`.
 - `[ ]` Add staging environment procedure.
 - `[ ]` Add pre-release checklist.
 - `[ ]` Add rollback procedure.
 - `[ ]` Pin image tags or define build provenance for releases.
 - `[ ]` Add version endpoint/build metadata.
-- `[ ]` Add production smoke test script.
+- `[x]` Add production smoke test script.
 
 Steps:
 
@@ -292,15 +295,15 @@ Steps:
 
 Safe Road can be called production MVP when all of these are true:
 
-- `[ ]` Public traffic only enters through intended ports.
-- `[ ]` Production secrets are explicit, strong, and not printed in logs.
-- `[ ]` DoH over HTTPS works from the public internet.
-- `[ ]` DoT uses a trusted certificate or has a documented client trust model.
-- `[ ]` Block page works for blocked DNS answers.
-- `[ ]` Threat feeds sync from the official preset and stale status is visible.
-- `[ ]` Backups are copied offsite and restore has been tested.
-- `[ ]` Structured logs and request IDs exist.
-- `[ ]` Alerts exist for the main failure modes.
+- `[~]` Public traffic only enters through intended ports. Compose bindings and validation scripts are complete; a real environment execution record is still needed.
+- `[x]` Production secrets are explicit, strong, and not printed in logs.
+- `[~]` DoH over HTTPS works through the Caddy production edge; public-internet execution still needs to be recorded per deployment.
+- `[x]` DoT uses a trusted certificate path or documented client trust model, and configured TLS key failures now fail fast.
+- `[x]` Block page and configurable DNS blocking strategies work for blocked DNS answers.
+- `[x]` Threat feeds sync from the official preset and stale status is visible.
+- `[~]` Backups can be copied offsite and restored by scripts; a scheduled restore drill still needs to be recorded.
+- `[x]` Structured logs and request IDs exist.
+- `[x]` Alerts exist for the main failure modes.
 - `[ ]` Performance target is proven on the target VPS.
 - `[ ]` Threat model is written and release-blocking risks are addressed.
-- `[ ]` Staging deploy and production smoke tests pass.
+- `[~]` Staging deploy and production smoke tests are scripted; pass records from the target environment are still needed.

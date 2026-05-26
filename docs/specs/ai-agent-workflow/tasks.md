@@ -1,6 +1,6 @@
 # Tasks: AI Agent Workflow
 
-Synced with repository state on 2026-05-21. Code-backed items are checked; external/manual validation remains open until recorded.
+Synced with repository state on 2026-05-26. Code-backed items are checked; the remaining open smoke test requires a live Agent cycle and recorded environment output.
 
 ## Milestone 1: Agent Engine
 

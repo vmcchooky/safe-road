@@ -6,7 +6,7 @@ DNS-over-HTTPS (DoH) hoạt động rất tốt trên các trình duyệt web hi
 Mục tiêu của **Hướng 7** là nâng cấp `dns-resolver` để chạy song song cả server **DoH (port 443/8081)** và **DoT (port 853)** trên cùng máy chủ để:
 - Bảo vệ toàn bộ thiết bị di động (Android, iOS) ở tầng hệ điều hành mà không cần cài đặt thêm phần mềm của bên thứ ba.
 - Giữ nguyên triết lý thiết kế **Zero-Cost**: Không phát sinh thêm chi phí vận hành, chạy cực nhẹ trực tiếp trên RAM máy chủ.
-- Tự động sinh chứng chỉ TLS tự ký (Self-Signed) nếu không tìm thấy chứng chỉ Let's Encrypt cấu hình, giúp việc chạy thử ở local diễn ra trơn tru ngay lập tức (Zero-Configuration startup).
+- Tự động sinh chứng chỉ TLS tự ký (Self-Signed) khi không cấu hình chứng chỉ Let's Encrypt, giúp việc chạy thử ở local diễn ra trơn tru ngay lập tức; nếu người vận hành đã cấu hình đường dẫn cert/key nhưng tải thất bại, server phải fail fast để tránh trạng thái production "UP" nhưng client DoT không tin cậy được.
 
 ---
 
@@ -17,13 +17,18 @@ Dịch vụ `dns-resolver` phải khởi chạy song song hai server trên hai c
 1.  **DoH Server:** HTTP/HTTPS REST endpoint (nhận các query `/dns-query` thông qua reverse proxy).
 2.  **DoT Server:** Raw TCP server bọc TLS lắng nghe trực tiếp trên cổng mặc định `853` (hoặc cổng tùy biến qua biến môi trường để chạy không cần quyền root lúc phát triển).
 
-### DOT-REQ-002: Zero-Configuration TLS Fallback
+### DOT-REQ-002: Zero-Configuration TLS Fallback + Production Fail-Fast
 - Khi cấu hình đường dẫn chứng chỉ Let's Encrypt qua biến môi trường (`SAFE_ROAD_DNS_DOT_CERT_FILE` và `SAFE_ROAD_DNS_DOT_KEY_FILE`), server DoT sẽ tải chứng chỉ thật từ ổ đĩa.
-- Nếu không cấu hình hoặc các file chứng chỉ không tồn tại/không đọc được, server phải tự động phát sinh một cặp khóa và **chứng chỉ SSL tự ký (Self-Signed Certificate)** tạm thời trực tiếp trên bộ nhớ RAM để đảm bảo dịch vụ không bị crash và có thể khởi động ngay lập tức trong môi trường dev/local.
+- Nếu một trong hai biến cert/key được cấu hình nhưng `tls.LoadX509KeyPair` thất bại, server phải ghi log lỗi và thoát ngay (`os.Exit(1)`).
+- Nếu không cấu hình cert/key, server tự động phát sinh một cặp khóa và **chứng chỉ SSL tự ký (Self-Signed Certificate)** tạm thời trực tiếp trên bộ nhớ RAM để đảm bảo môi trường dev/local vẫn khởi động không cần cấu hình.
 
 ### DOT-REQ-003: Cơ chế Phân tích và Chặn Tên miền Đồng bộ
 Mỗi truy vấn DNS gửi tới cổng DoT phải được phân tách để kiểm tra chính sách thông qua dịch vụ `risk.Service` dùng chung:
-- **Nếu là tên miền thuộc diện chặn (BLOCK):** Trả về bản ghi `A` (hoặc `AAAA`) trỏ thẳng về IP của trang cảnh báo (`blockPageIP`), với TTL cấu hình thấp để tránh client cache lâu.
+- **Nếu là tên miền thuộc diện chặn (BLOCK):** Áp dụng `SAFE_ROAD_DNS_BLOCK_STRATEGY`:
+  - `sinkhole`: trả về bản ghi `A`/`AAAA` trỏ về IP trang cảnh báo (`blockPageIP`), với TTL cấu hình thấp.
+  - `nxdomain`: trả về `NXDOMAIN`.
+  - `refused`: trả về `REFUSED`.
+  - `nullip`: trả về `0.0.0.0` cho `A` hoặc `::` cho `AAAA`.
 - **Nếu là tên miền an toàn (ALLOW):** Chuyển tiếp truy vấn an toàn tới Upstream Resolver sử dụng giao thức DoH (tái sử dụng `forwardDoH`) và trả kết quả sạch về cho client.
 
 ### DOT-REQ-004: Tích hợp Rate Limiting & Bảo vệ DDoS

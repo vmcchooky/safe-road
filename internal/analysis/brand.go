@@ -166,26 +166,26 @@ func getMainLabel(domain string) string {
 
 var homoglyphMap = map[rune]rune{
 	// Cyrillic lookalikes
-	'а': 'a', 'б': 'b', 'с': 'c', 'ԁ': 'd', 'е': 'e', 'f': 'f', 'g': 'g', 'һ': 'h', 
-	'і': 'i', 'ј': 'j', 'k': 'k', 'l': 'l', 'm': 'm', 'п': 'n', 'о': 'o', 'р': 'p', 
-	'q': 'q', 'г': 'r', 'ѕ': 's', 'т': 't', 'υ': 'u', 'ѵ': 'v', 'ԝ': 'w', 'х': 'x', 
+	'а': 'a', 'б': 'b', 'с': 'c', 'ԁ': 'd', 'е': 'e', 'f': 'f', 'g': 'g', 'һ': 'h',
+	'і': 'i', 'ј': 'j', 'k': 'k', 'l': 'l', 'm': 'm', 'п': 'n', 'о': 'o', 'р': 'p',
+	'q': 'q', 'г': 'r', 'ѕ': 's', 'т': 't', 'υ': 'u', 'ѵ': 'v', 'ԝ': 'w', 'х': 'x',
 	'у': 'y', 'z': 'z',
 	// Uppercase & extensions
-	'А': 'a', 'В': 'b', 'С': 'c', 'Е': 'e', 'Н': 'h', 'І': 'i', 'Ј': 'j', 'К': 'k', 
+	'А': 'a', 'В': 'b', 'С': 'c', 'Е': 'e', 'Н': 'h', 'І': 'i', 'Ј': 'j', 'К': 'k',
 	'М': 'm', 'О': 'o', 'Р': 'p', 'Ѕ': 's', 'Т': 't', 'Х': 'x', 'Ү': 'y',
 	// Greek lookalikes
-	'α': 'a', 'β': 'b', 'ε': 'e', 'ι': 'i', 'κ': 'k', 'ο': 'o', 'ρ': 'p', 'τ': 't', 
+	'α': 'a', 'β': 'b', 'ε': 'e', 'ι': 'i', 'κ': 'k', 'ο': 'o', 'ρ': 'p', 'τ': 't',
 	'χ': 'x',
 }
 
 var keyboardAdjacency = map[rune]string{
-	'a': "qwsz",      'b': "vghn",      'c': "xdfv",      'd': "ersfxc",
-	'e': "wsdr34",    'f': "rtgvcd",    'g': "tyhbvf",    'h': "yujnbg",
-	'i': "ujko89",    'j': "uikmnh",    'k': "ijlm09",    'l': "okp",
-	'm': "njk",       'n': "bhjm",      'o': "iklp90",    'p': "ol0",
-	'q': "w12a",      'r': "edft45",    's': "wedxza",    't': "rfgy56",
-	'u': "yhji78",    'v': "cfgb",      'w': "qase23",    'x': "zsdc",
-	'y': "tghu67",    'z': "asx",
+	'a': "qwsz", 'b': "vghn", 'c': "xdfv", 'd': "ersfxc",
+	'e': "wsdr34", 'f': "rtgvcd", 'g': "tyhbvf", 'h': "yujnbg",
+	'i': "ujko89", 'j': "uikmnh", 'k': "ijlm09", 'l': "okp",
+	'm': "njk", 'n': "bhjm", 'o': "iklp90", 'p': "ol0",
+	'q': "w12a", 'r': "edft45", 's': "wedxza", 't': "rfgy56",
+	'u': "yhji78", 'v': "cfgb", 'w': "qase23", 'x': "zsdc",
+	'y': "tghu67", 'z': "asx",
 }
 
 var suspiciousTLDs = map[string]bool{
@@ -293,6 +293,9 @@ func CheckBrandSpoofing(domain string, brandSpoofingScore int) (bool, string, in
 	}
 
 	rootDomain := getRootDomain(domain)
+	if isVietnamGovernmentRoot(rootDomain) {
+		return false, "", 0
+	}
 	labels := strings.Split(domain, ".")
 
 	rootParts := strings.Split(rootDomain, ".")
@@ -404,7 +407,7 @@ func CheckBrandSpoofing(domain string, brandSpoofingScore int) (bool, string, in
 			if len(rootParts) > 0 {
 				rootPartsCount = len(rootParts)
 			}
-			
+
 			if i < len(labels)-rootPartsCount {
 				if label == brand.Name || strings.Contains(label, brand.Name) ||
 					skLabel == brand.Name || strings.Contains(skLabel, brand.Name) {
@@ -419,4 +422,9 @@ func CheckBrandSpoofing(domain string, brandSpoofingScore int) (bool, string, in
 	}
 
 	return false, "", 0
+}
+
+func isVietnamGovernmentRoot(rootDomain string) bool {
+	rootDomain = strings.ToLower(strings.TrimSpace(rootDomain))
+	return rootDomain == "gov.vn" || strings.HasSuffix(rootDomain, ".gov.vn")
 }

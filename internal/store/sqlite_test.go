@@ -38,6 +38,35 @@ func TestNewDisabledWhenPathEmpty(t *testing.T) {
 	}
 }
 
+func TestOSINTEvidenceRoundTrip(t *testing.T) {
+	db := newTestDB(t)
+	expires := time.Now().Add(time.Hour).UTC().Format(time.RFC3339Nano)
+	err := db.ReplaceOSINTEvidence("baohiem-online.com", []OSINTEvidence{{
+		Domain:       "baohiem-online.com",
+		SourceURL:    "https://example.gov.vn/canh-bao",
+		SourceTitle:  "Cảnh báo",
+		SourceType:   "official_warning",
+		Confidence:   0.95,
+		MatchedTerms: []string{"giả mạo", "lừa đảo"},
+		RetrievedAt:  time.Now().UTC().Format(time.RFC3339Nano),
+		ExpiresAt:    expires,
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	items, err := db.ListOSINTEvidence("baohiem-online.com", time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(items) != 1 {
+		t.Fatalf("expected one evidence item, got %d", len(items))
+	}
+	if items[0].SourceType != "official_warning" || len(items[0].MatchedTerms) != 2 {
+		t.Fatalf("unexpected evidence item: %#v", items[0])
+	}
+}
+
 func TestNilDBEnabled(t *testing.T) {
 	var db *DB
 	if db.Enabled() {
@@ -829,4 +858,3 @@ func TestGetEffectiveOverride(t *testing.T) {
 		t.Fatalf("expected 1 group override after deletion, got %d", len(ovs))
 	}
 }
-

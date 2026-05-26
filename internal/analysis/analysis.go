@@ -29,6 +29,8 @@ type Result struct {
 	Category   string   `json:"category,omitempty"` // e.g., "social_media", "adult", "gambling", "gaming", "advertising", "malware", "phishing", "uncategorized"
 }
 
+const protectedPublicServiceReason = "protected Vietnamese public-service keyword abuse (dichvucong)"
+
 type Analyzer struct {
 	config config.AnalysisConfig
 }
@@ -81,9 +83,9 @@ func ClassifyCategory(domain string) string {
 		}
 	}
 	// Check prefixes or contains for advertising
-	if strings.HasPrefix(domain, "ads.") || strings.HasPrefix(domain, "ad.") || 
-		strings.Contains(domain, "analytics.") || strings.Contains(domain, "tracker.") || 
-		strings.Contains(domain, "telemetry.") || strings.Contains(domain, "-analytics") || 
+	if strings.HasPrefix(domain, "ads.") || strings.HasPrefix(domain, "ad.") ||
+		strings.Contains(domain, "analytics.") || strings.Contains(domain, "tracker.") ||
+		strings.Contains(domain, "telemetry.") || strings.Contains(domain, "-analytics") ||
 		strings.Contains(domain, "adserver") {
 		return "advertising"
 	}
@@ -181,6 +183,13 @@ func (a *Analyzer) Analyze(input string) Result {
 		}
 	}
 
+	if isProtectedVietnamPublicServiceAbuse(domain) {
+		if score < 75 {
+			score = 75
+		}
+		reasons = append(reasons, protectedPublicServiceReason)
+	}
+
 	// 7. Advanced Brand Spoofing Detection
 	if isSpoof, reason, penalty := CheckBrandSpoofing(domain, a.config.BrandSpoofingScore); isSpoof {
 		score += penalty
@@ -232,6 +241,20 @@ func (a *Analyzer) Analyze(input string) Result {
 		Reasons:    reasons,
 		Category:   category,
 	}
+}
+
+func isProtectedVietnamPublicServiceAbuse(domain string) bool {
+	domain = strings.ToLower(strings.TrimSpace(domain))
+	if domain == "" || !strings.Contains(domain, "dichvucong") {
+		return false
+	}
+
+	root := getRootDomain(domain)
+	if root == "dichvucong.gov.vn" || strings.HasSuffix(root, ".gov.vn") || strings.HasSuffix(domain, ".gov.vn") {
+		return false
+	}
+
+	return strings.Contains(root, "dichvucong")
 }
 
 func NormalizeDomain(input string) (string, error) {
@@ -340,4 +363,3 @@ func (e invalidDomainError) Error() string {
 func errInvalidDomain(message string) error {
 	return invalidDomainError(message)
 }
-

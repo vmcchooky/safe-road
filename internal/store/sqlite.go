@@ -93,6 +93,18 @@ type AgentEvent struct {
 	CreatedAt string `json:"created_at"`
 }
 
+type OSINTEvidence struct {
+	ID           int64    `json:"id,omitempty"`
+	Domain       string   `json:"domain"`
+	SourceURL    string   `json:"source_url"`
+	SourceTitle  string   `json:"source_title,omitempty"`
+	SourceType   string   `json:"source_type"`
+	Confidence   float64  `json:"confidence"`
+	MatchedTerms []string `json:"matched_terms,omitempty"`
+	RetrievedAt  string   `json:"retrieved_at"`
+	ExpiresAt    string   `json:"expires_at"`
+}
+
 // DomainCount holds a domain and its occurrence count from audit queries.
 type DomainCount struct {
 	Domain string `json:"domain"`
@@ -155,6 +167,22 @@ CREATE TABLE IF NOT EXISTS agent_audit_log (
 );
 CREATE INDEX IF NOT EXISTS idx_agent_audit_task ON agent_audit_log(task_name);
 CREATE INDEX IF NOT EXISTS idx_agent_audit_created ON agent_audit_log(created_at);
+
+CREATE TABLE IF NOT EXISTS osint_evidence (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    domain TEXT NOT NULL,
+    source_url TEXT NOT NULL,
+    source_title TEXT DEFAULT '',
+    source_type TEXT NOT NULL,
+    confidence REAL NOT NULL,
+    matched_terms TEXT,
+    retrieved_at TEXT NOT NULL,
+    expires_at TEXT NOT NULL,
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    UNIQUE(domain, source_url)
+);
+CREATE INDEX IF NOT EXISTS idx_osint_evidence_domain ON osint_evidence(domain);
+CREATE INDEX IF NOT EXISTS idx_osint_evidence_expires ON osint_evidence(expires_at);
 
 CREATE TABLE IF NOT EXISTS whitelist_domains (
     domain TEXT PRIMARY KEY,
@@ -663,6 +691,124 @@ func (d *DB) QuerySuspiciousDomains(since time.Time, minOccurrences, limit int) 
 		results = append(results, dc)
 	}
 	return results, rows.Err()
+}
+
+// QueryRecentAllowedOrSuspiciousDomains returns recently seen non-malicious
+// domains for background evidence checks. The caller applies domain-keyword
+// filtering so this query stays simple and index-friendly.
+func (d *DB) QueryRecentAllowedOrSuspiciousDomains(since time.Time, limit int) ([]DomainCount, error) {
+	if !d.Enabled() {
+		return nil, nil
+	}
+	if limit <= 0 {
+		limit = 50
+	}
+
+	sinceStr := since.UTC().Format(time.RFC3339)
+	rows, err := d.db.Query(`
+		SELECT domain, COUNT(*) AS cnt
+		FROM analysis_log
+		WHERE verdict IN ('SAFE', 'SUSPICIOUS') AND analyzed_at >= ?
+		GROUP BY domain
+		ORDER BY cnt DESC
+		LIMIT ?`, sinceStr, limit)
+	if err != nil {
+		return nil, fmt.Errorf("query osint candidate domains: %w", err)
+	}
+	defer rows.Close()
+
+	var results []DomainCount
+	for rows.Next() {
+		var dc DomainCount
+		if err := rows.Scan(&dc.Domain, &dc.Count); err != nil {
+			return nil, fmt.Errorf("scan osint candidate: %w", err)
+		}
+		results = append(results, dc)
+	}
+	return results, rows.Err()
+}
+
+func (d *DB) ReplaceOSINTEvidence(domain string, evidence []OSINTEvidence) error {
+	if !d.Enabled() {
+		return nil
+	}
+	domain = strings.TrimSpace(strings.ToLower(domain))
+	if domain == "" {
+		return fmt.Errorf("domain is required")
+	}
+
+	tx, err := d.db.Begin()
+	if err != nil {
+		return fmt.Errorf("begin osint evidence transaction: %w", err)
+	}
+	defer tx.Rollback()
+
+	if _, err := tx.Exec(`DELETE FROM osint_evidence WHERE domain = ?`, domain); err != nil {
+		return fmt.Errorf("delete old osint evidence: %w", err)
+	}
+
+	stmt, err := tx.Prepare(`
+		INSERT INTO osint_evidence
+			(domain, source_url, source_title, source_type, confidence, matched_terms, retrieved_at, expires_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?)`)
+	if err != nil {
+		return fmt.Errorf("prepare osint evidence insert: %w", err)
+	}
+	defer stmt.Close()
+
+	for _, item := range evidence {
+		termsJSON, _ := json.Marshal(item.MatchedTerms)
+		if item.Domain == "" {
+			item.Domain = domain
+		}
+		if _, err := stmt.Exec(
+			item.Domain,
+			item.SourceURL,
+			item.SourceTitle,
+			item.SourceType,
+			item.Confidence,
+			string(termsJSON),
+			item.RetrievedAt,
+			item.ExpiresAt,
+		); err != nil {
+			return fmt.Errorf("insert osint evidence: %w", err)
+		}
+	}
+
+	return tx.Commit()
+}
+
+func (d *DB) ListOSINTEvidence(domain string, now time.Time) ([]OSINTEvidence, error) {
+	if !d.Enabled() {
+		return nil, nil
+	}
+	domain = strings.TrimSpace(strings.ToLower(domain))
+	if domain == "" {
+		return nil, fmt.Errorf("domain is required")
+	}
+	nowStr := now.UTC().Format(time.RFC3339Nano)
+	rows, err := d.db.Query(`
+		SELECT id, domain, source_url, COALESCE(source_title, ''), source_type, confidence,
+		       COALESCE(matched_terms, '[]'), retrieved_at, expires_at
+		FROM osint_evidence
+		WHERE domain = ? AND expires_at > ?
+		ORDER BY confidence DESC, retrieved_at DESC`, domain, nowStr)
+	if err != nil {
+		return nil, fmt.Errorf("list osint evidence: %w", err)
+	}
+	defer rows.Close()
+
+	var items []OSINTEvidence
+	for rows.Next() {
+		var item OSINTEvidence
+		var termsJSON string
+		if err := rows.Scan(&item.ID, &item.Domain, &item.SourceURL, &item.SourceTitle, &item.SourceType, &item.Confidence, &termsJSON, &item.RetrievedAt, &item.ExpiresAt); err != nil {
+			return nil, fmt.Errorf("scan osint evidence: %w", err)
+		}
+		_ = json.Unmarshal([]byte(termsJSON), &item.MatchedTerms)
+		items = append(items, item)
+	}
+	return items, rows.Err()
 }
 
 // --- Whitelist ---

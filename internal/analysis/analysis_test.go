@@ -14,22 +14,22 @@ func TestClassifyCategory(t *testing.T) {
 		{"tiktok.com", "social_media"},
 		{"chat.whatsapp.com", "social_media"},
 		{"google.com", "uncategorized"},
-		
+
 		{"doubleclick.net", "advertising"},
 		{"ads.google.com", "advertising"},
 		{"adserver.yahoo.com", "advertising"},
 		{"my-tracker-analytics.com", "advertising"},
-		
+
 		{"porn.com", "adult"},
 		{"something.xxx", "adult"},
 		{"xvideos.com", "adult"},
 		{"onlyfans.com", "adult"},
-		
+
 		{"casino.com", "gambling"},
 		{"w88vn.com", "gambling"},
 		{"fun88.com", "gambling"},
 		{"playpoker.net", "gambling"},
-		
+
 		{"roblox.com", "gaming"},
 		{"minecraft.net", "gaming"},
 		{"epicgames.com", "gaming"},
@@ -63,4 +63,43 @@ func TestAnalyzeCategoryFallback(t *testing.T) {
 			t.Errorf("expected suspicious or phishing category for suspicious domain, got %s", res2.Category)
 		}
 	}
+}
+
+func TestAnalyzeVietnamPublicServiceAbuse(t *testing.T) {
+	result := Analyze("dichvucong-vn.com")
+	if result.Verdict != VerdictMalicious {
+		t.Fatalf("expected dichvucong-vn.com to be malicious, got %s with score %d and reasons %v", result.Verdict, result.Score, result.Reasons)
+	}
+	if result.Score < 70 {
+		t.Fatalf("expected malicious score >= 70, got %d", result.Score)
+	}
+	if result.Category != "phishing" {
+		t.Fatalf("expected phishing category, got %s", result.Category)
+	}
+	if !containsReason(result.Reasons, protectedPublicServiceReason) {
+		t.Fatalf("expected protected public-service reason, got %v", result.Reasons)
+	}
+}
+
+func TestAnalyzeVietnamPublicServiceOfficialGovDomains(t *testing.T) {
+	for _, domain := range []string{"dichvucong.gov.vn", "dichvucong.hanoi.gov.vn"} {
+		t.Run(domain, func(t *testing.T) {
+			result := Analyze(domain)
+			if result.Verdict == VerdictMalicious {
+				t.Fatalf("expected %s not to be escalated to malicious, got %s with reasons %v", domain, result.Verdict, result.Reasons)
+			}
+			if containsReason(result.Reasons, protectedPublicServiceReason) {
+				t.Fatalf("expected no protected public-service reason for %s, got %v", domain, result.Reasons)
+			}
+		})
+	}
+}
+
+func containsReason(reasons []string, needle string) bool {
+	for _, reason := range reasons {
+		if reason == needle {
+			return true
+		}
+	}
+	return false
 }

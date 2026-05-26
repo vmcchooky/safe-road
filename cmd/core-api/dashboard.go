@@ -1,7 +1,7 @@
 package main
 
 import (
-	_ "embed"
+	"embed"
 	"net/http"
 	"safe-road/internal/auth"
 )
@@ -11,6 +11,9 @@ var dashboardHTML string
 
 //go:embed login.html
 var loginHTML string
+
+//go:embed assets/*
+var assetsFS embed.FS
 
 func (a *app) dashboardHandler(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {

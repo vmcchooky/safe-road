@@ -176,6 +176,23 @@ func main() {
 			len(feedSources) > 0,
 		)
 
+		osintTask := agent.NewOSINTTask(
+			api.risk.StoreDB(),
+			api.risk.OSINT(),
+			api.risk.RedisCache(),
+			agent.OSINTConfig{
+				MaxPerCycle: config.Int("SAFE_ROAD_AGENT_OSINT_MAX_PER_CYCLE", 50),
+				Lookback:    config.DurationSeconds("SAFE_ROAD_AGENT_OSINT_LOOKBACK_SECONDS", 24*time.Hour),
+				ThreatKey:   feedKey,
+			},
+		)
+		agentEngine.Register(
+			osintTask,
+			config.DurationSeconds("SAFE_ROAD_AGENT_OSINT_INTERVAL_SECONDS", 1*time.Hour),
+			config.DurationSeconds("SAFE_ROAD_AGENT_OSINT_TIMEOUT_SECONDS", 2*time.Minute),
+			config.Bool("SAFE_ROAD_OSINT_ENABLED", false),
+		)
+
 		// Alert Task
 		alertTask := agent.NewAlertTask(
 			api.risk.StoreDB(),
@@ -241,6 +258,7 @@ func main() {
 	mux.HandleFunc("/v1/version", versionHandler)
 	mux.HandleFunc("/metrics", api.metricsHandler)
 	mux.HandleFunc("/v1/analyze", api.analyzeHandler)
+	mux.HandleFunc("/v1/osint/evidence", api.requireAuthFunc(api.osintEvidenceHandler))
 	mux.HandleFunc("/v1/analysis/recent", api.recentAnalysisHandler)
 	mux.HandleFunc("/v1/auth/login", api.authLoginHandler)
 	mux.HandleFunc("/v1/auth/logout", api.authLogoutHandler)
@@ -252,6 +270,7 @@ func main() {
 	mux.HandleFunc("/v1/groups", api.requireAuthFunc(api.groupsHandler))
 	mux.HandleFunc("/v1/mappings", api.requireAuthFunc(api.mappingsHandler))
 	mux.HandleFunc("/v1/group-overrides", api.requireAuthFunc(api.groupOverridesHandler))
+	mux.Handle("/assets/", http.FileServer(http.FS(assetsFS)))
 	mux.HandleFunc("/dashboard", api.dashboardHandler)
 	mux.HandleFunc("/dashboard/", api.dashboardHandler)
 
@@ -321,6 +340,7 @@ func (a *app) statusHandler(w http.ResponseWriter, r *http.Request) {
 			"/block",
 			"/v1/version",
 			"/v1/analyze?domain=example.com",
+			"/v1/osint/evidence?domain=example.com",
 			"/v1/analysis/recent",
 			"/v1/overrides",
 			"/v1/telemetry/recent",
@@ -376,9 +396,31 @@ func (a *app) analyzeHandler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	clientInfo := extractClientInfo(r)
-	response := a.risk.Analyze(r.Context(), domain, clientInfo)
+	response := a.risk.AnalyzeWithOptions(r.Context(), domain, clientInfo, risk.AnalyzeOptions{
+		IncludeEvidence: r.URL.Query().Get("include_evidence") == "1",
+		ForceOSINT:      r.URL.Query().Get("force_osint") == "1",
+	})
 	a.risk.RecordRecent(r.Context(), response)
 	writeJSON(w, http.StatusOK, response)
+}
+
+func (a *app) osintEvidenceHandler(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+	domain := r.URL.Query().Get("domain")
+	if domain == "" {
+		writeError(w, http.StatusBadRequest, "domain query parameter is required")
+		return
+	}
+	force := r.URL.Query().Get("refresh") == "1" || r.URL.Query().Get("force") == "1"
+	report, err := a.risk.OSINTEvidence(r.Context(), domain, force)
+	if err != nil {
+		writeError(w, http.StatusBadGateway, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, report)
 }
 
 func (a *app) recentAnalysisHandler(w http.ResponseWriter, r *http.Request) {

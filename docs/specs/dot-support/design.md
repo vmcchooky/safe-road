@@ -26,9 +26,9 @@ Cổng DNS-over-TLS (DoT) được tích hợp trực tiếp vào nhị phân `d
 
 ---
 
-## 2. Giải pháp sinh Chứng chỉ TLS tự ký (Self-Signed Certificates)
+## 2. Giải pháp TLS: Local Fallback, Production Fail-Fast
 
-Để tránh lỗi crash và giúp lập trình viên phát triển cục bộ một cách dễ dàng nhất, hệ thống tự động sinh ra chứng chỉ TLS tự ký nếu không tìm thấy chứng chỉ được chỉ định.
+Để giúp lập trình viên phát triển cục bộ một cách dễ dàng nhất, hệ thống tự động sinh ra chứng chỉ TLS tự ký khi không cấu hình cert/key. Trong production, nếu người vận hành đã cấu hình `SAFE_ROAD_DNS_DOT_CERT_FILE` hoặc `SAFE_ROAD_DNS_DOT_KEY_FILE` nhưng `tls.LoadX509KeyPair` thất bại, tiến trình fail fast bằng `os.Exit(1)` để tránh việc DoT âm thầm chạy với chứng chỉ không được client tin cậy.
 
 ```go
 func generateSelfSignedCert() (tls.Certificate, error) {
@@ -69,14 +69,14 @@ func generateSelfSignedCert() (tls.Certificate, error) {
 Sử dụng thư viện `github.com/miekg/dns` để khởi chạy máy chủ TCP bọc TLS:
 
 ```go
-// Tải hoặc tự sinh chứng chỉ
+// Tải chứng chỉ thật nếu được cấu hình; fail fast nếu cấu hình bị lỗi.
 var cert tls.Certificate
-if certFile != "" && keyFile != "" {
+if certFile != "" || keyFile != "" {
     var err error
     cert, err = tls.LoadX509KeyPair(certFile, keyFile)
     if err != nil {
-        log.Printf("failed to load TLS keys: %v, falling back to self-signed cert", err)
-        cert, _ = generateSelfSignedCert()
+        log.Printf("failed to load configured TLS keys: %v", err)
+        os.Exit(1)
     }
 } else {
     log.Println("TLS key files not configured, generating temporary self-signed cert")
@@ -105,7 +105,7 @@ Handler DoT sẽ thực hiện các bước sau:
 2.  **Extract Domain:** Lấy domain truy vấn từ câu hỏi đầu tiên.
 3.  **Evaluate Policy:** Gọi `risk.Policy(ctx, domain, clientInfo)`.
 4.  **Action Plan:**
-    -   Nếu `BLOCK`: Tạo response A/AAAA chứa IP trang cảnh báo và trả về.
+    -   Nếu `BLOCK`: Tạo response theo `SAFE_ROAD_DNS_BLOCK_STRATEGY`: `sinkhole`, `nxdomain`, `refused`, hoặc `nullip`.
     -   Nếu `ALLOW`: Đóng gói DNS message gốc thành payload byte thô, forward tới upstream bằng DoH (`forwardDoH`), parse kết quả nhận được và ghi trả lại cho client TLS.
 
 ### Tích hợp Rate Limiting thủ công trong DoT Handler:

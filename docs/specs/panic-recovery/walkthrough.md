@@ -20,10 +20,10 @@ Tài liệu này tổng hợp kết quả thiết kế, triển khai thực tế
 ### 1.2. Ứng dụng Core API & DNS Resolver
 *   **[cmd/core-api/main.go](file:///d:/Go/duan/safe-road/cmd/core-api/main.go)**:
     *   Tích hợp `serve.Recovery` bọc ngoài router chính và nằm ngay dưới middleware ghi log request `logRequests`.
-    *   Cập nhật middleware `logRequests` để bỏ qua việc Observe metrics nếu request context đã được đánh dấu là `serve.ObservedPanicKey`, tránh ghi nhận trùng lặp sự cố trong telemetry.
+    *   Cập nhật middleware `logRequests` để tạo một biến `panicObserved := false`, truyền con trỏ `*bool` qua context bằng `serve.ObservedPanicKey`, và bỏ qua `metrics.Observe` nếu `serve.Recovery` đã set con trỏ này sau khi ghi nhận lỗi 500. Cách này tránh vấn đề context immutable trong Go và loại bỏ double observe.
 *   **[cmd/dns-resolver/main.go](file:///d:/Go/duan/safe-road/cmd/dns-resolver/main.go)**:
     *   Tích hợp `serve.Recovery` tương tự cho luồng xử lý HTTP (DoH) nhằm tăng cường độ bền vững tối đa, chống crash luồng server.
-    *   Cập nhật `logRequests` tương thích với cơ chế đánh dấu context của `serve.Recovery`.
+    *   Cập nhật `logRequests` tương thích với cơ chế `*bool` mutable marker của `serve.Recovery`.
 
 ### 1.3. Hệ thống Kiểm thử Tự động (Automated Unit Tests)
 *   **[internal/serve/http_test.go](file:///d:/Go/duan/safe-road/internal/serve/http_test.go)**:

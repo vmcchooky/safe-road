@@ -17,6 +17,7 @@ import (
 	"safe-road/internal/correlation"
 	"safe-road/internal/feed"
 	"safe-road/internal/logjson"
+	"safe-road/internal/osint"
 	"safe-road/internal/store"
 	"safe-road/internal/tlsinspect"
 	"safe-road/internal/whois"
@@ -25,6 +26,7 @@ import (
 const recentAnalysisKey = "safe-road:analysis:recent"
 const defaultThreatFeedKey = "safe-road:threat:feed"
 const threatFeedReason = "matched local threat feed"
+const analysisAlgorithmRevision = "2026-05-osint-v1"
 
 type Options struct {
 	Redis          *cache.Redis
@@ -48,6 +50,8 @@ type Options struct {
 	// Enrichment (TLS + WHOIS)
 	EnrichEnabled bool
 	EnrichTimeout time.Duration
+	// OSINT evidence lookup for API/dashboard paths.
+	OSINT *osint.Service
 }
 
 type Service struct {
@@ -65,6 +69,7 @@ type Service struct {
 	store           *store.DB
 	enrichEnabled   bool
 	enrichTimeout   time.Duration
+	osint           *osint.Service
 }
 
 type ClientInfo struct {
@@ -74,8 +79,9 @@ type ClientInfo struct {
 
 type Analysis struct {
 	analysis.Result
-	CacheHit   bool   `json:"cache_hit"`
-	AnalyzedAt string `json:"analyzed_at"`
+	CacheHit   bool             `json:"cache_hit"`
+	AnalyzedAt string           `json:"analyzed_at"`
+	Evidence   []osint.Evidence `json:"evidence,omitempty"`
 }
 
 type Policy struct {
@@ -92,9 +98,24 @@ type CacheStatus struct {
 }
 
 type analysisCacheEntry struct {
-	Result       analysis.Result `json:"result"`
-	FeedRevision string          `json:"feed_revision,omitempty"`
+	Result           analysis.Result `json:"result"`
+	FeedRevision     string          `json:"feed_revision,omitempty"`
+	AnalysisRevision string          `json:"analysis_revision,omitempty"`
+	OSINTCheckedAt   string          `json:"osint_checked_at,omitempty"`
 }
+
+type AnalyzeOptions struct {
+	IncludeEvidence bool
+	ForceOSINT      bool
+}
+
+type osintLookupMode int
+
+const (
+	osintLookupNone osintLookupMode = iota
+	osintLookupCachedOnly
+	osintLookupOnDemand
+)
 
 func NewService(options Options) *Service {
 	recentLimit := options.RecentLimit
@@ -141,6 +162,7 @@ func NewService(options Options) *Service {
 		store:           options.Store,
 		enrichEnabled:   options.EnrichEnabled,
 		enrichTimeout:   options.EnrichTimeout,
+		osint:           options.OSINT,
 	}
 }
 
@@ -159,9 +181,14 @@ func (s *Service) Close() error {
 }
 
 func (s *Service) Analyze(ctx context.Context, domain string, client ClientInfo) Analysis {
+	return s.AnalyzeWithOptions(ctx, domain, client, AnalyzeOptions{})
+}
+
+func (s *Service) AnalyzeWithOptions(ctx context.Context, domain string, client ClientInfo, options AnalyzeOptions) Analysis {
 	normalized, err := analysis.NormalizeDomain(domain)
 	var result analysis.Result
 	var cacheHit bool
+	var evidence []osint.Evidence
 
 	if err != nil {
 		result = s.analyzer.Analyze(domain)
@@ -220,7 +247,7 @@ func (s *Service) Analyze(ctx context.Context, domain string, client ClientInfo)
 
 		if result.Domain == "" {
 			// 3. Fallback to threat assessment
-			result, cacheHit = s.analyze(ctx, normalized)
+			result, cacheHit, evidence = s.analyze(ctx, normalized, osintLookupOnDemand, options.ForceOSINT)
 		}
 	}
 
@@ -228,6 +255,9 @@ func (s *Service) Analyze(ctx context.Context, domain string, client ClientInfo)
 		Result:     result,
 		CacheHit:   cacheHit,
 		AnalyzedAt: time.Now().UTC().Format(time.RFC3339Nano),
+	}
+	if options.IncludeEvidence {
+		a.Evidence = evidence
 	}
 	s.recordTelemetry(a, client)
 	return a
@@ -323,7 +353,7 @@ func (s *Service) Policy(ctx context.Context, domain string, client ClientInfo) 
 	}
 
 	// 4. Get Threat Assessment
-	result, cacheHit := s.analyze(ctx, normalized)
+	result, cacheHit, _ := s.analyze(ctx, normalized, osintLookupCachedOnly, false)
 
 	// 5. Dynamic enforcement
 	policy := "allow"
@@ -428,10 +458,10 @@ func (s *Service) CacheStatus(ctx context.Context) CacheStatus {
 	}
 }
 
-func (s *Service) analyze(ctx context.Context, domain string) (analysis.Result, bool) {
+func (s *Service) analyze(ctx context.Context, domain string, lookupMode osintLookupMode, forceOSINT bool) (analysis.Result, bool, []osint.Evidence) {
 	normalized, err := analysis.NormalizeDomain(domain)
 	if err != nil {
-		return s.analyzer.Analyze(domain), false
+		return s.analyzer.Analyze(domain), false, nil
 	}
 
 	// 1. Check Cache
@@ -442,7 +472,7 @@ func (s *Service) analyze(ctx context.Context, domain string) (analysis.Result, 
 		var entry analysisCacheEntry
 		found, err := s.redis.GetJSON(redisCtx, cacheKey, &entry)
 		if err == nil && found && entry.Result.Domain != "" {
-			if currentRevision == "" || entry.FeedRevision == currentRevision {
+			if entry.AnalysisRevision == analysisAlgorithmRevision && (currentRevision == "" || entry.FeedRevision == currentRevision) {
 				cached = entry.Result
 				return nil
 			}
@@ -454,13 +484,12 @@ func (s *Service) analyze(ctx context.Context, domain string) (analysis.Result, 
 		if err != nil || !found {
 			return err
 		}
-		if currentRevision == "" {
-			cached = legacy
-		}
 		return nil
 	})
 	if err == nil && cached.Domain != "" {
-		return cached, true
+		report := s.lookupOSINT(ctx, normalized, cached, lookupMode, forceOSINT)
+		updated := s.applyOSINT(ctx, normalized, cached, report, currentRevision)
+		return updated, true, report.Evidence
 	}
 	if err != nil && !errors.Is(err, cache.ErrDisabled) {
 		logjson.Warn("analysis cache read failed", correlation.Fields(ctx, map[string]any{
@@ -480,12 +509,17 @@ func (s *Service) analyze(ctx context.Context, domain string) (analysis.Result, 
 	s.enrichSuspicious(ctx, normalized, &result)
 	// 5. AI Refinement
 	result = s.refineWithAI(ctx, result)
+	// 6. OSINT public-warning evidence. API/dashboard can fetch on demand;
+	// resolver policy uses cached evidence only via lookupMode.
+	report := s.lookupOSINT(ctx, normalized, result, lookupMode, forceOSINT)
+	result = s.applyOSINT(ctx, normalized, result, report, currentRevision)
 
 	// Cache the final result
 	err = s.withRedis(ctx, func(redisCtx context.Context) error {
 		return s.redis.SetJSON(redisCtx, cacheKey, analysisCacheEntry{
-			Result:       result,
-			FeedRevision: currentRevision,
+			Result:           result,
+			FeedRevision:     currentRevision,
+			AnalysisRevision: analysisAlgorithmRevision,
 		}, s.ttlFor(result.Verdict))
 	})
 	if err != nil && !errors.Is(err, cache.ErrDisabled) {
@@ -496,7 +530,7 @@ func (s *Service) analyze(ctx context.Context, domain string) (analysis.Result, 
 		}))
 	}
 
-	return result, false
+	return result, false, report.Evidence
 }
 
 func (s *Service) feedResult(ctx context.Context, domain string) analysis.Result {
@@ -557,6 +591,96 @@ func (s *Service) refineWithAI(ctx context.Context, current analysis.Result) ana
 	}
 	current.Reasons = append(current.Reasons, aiResult.Reasons...)
 	return current
+}
+
+func (s *Service) lookupOSINT(ctx context.Context, domain string, result analysis.Result, mode osintLookupMode, force bool) osint.Report {
+	if s == nil || s.osint == nil || !s.osint.Enabled() || mode == osintLookupNone {
+		return osint.Report{}
+	}
+	if !force && !osint.ShouldLookup(domain, result) {
+		return osint.Report{}
+	}
+
+	switch mode {
+	case osintLookupCachedOnly:
+		report, ok := s.osint.Cached(ctx, domain)
+		if !ok {
+			return osint.Report{}
+		}
+		report.CacheHit = true
+		return report
+	case osintLookupOnDemand:
+		report, err := s.osint.Lookup(ctx, domain, force)
+		if err != nil {
+			logjson.Warn("osint lookup failed", correlation.Fields(ctx, map[string]any{
+				"service": "risk",
+				"domain":  domain,
+				"error":   err.Error(),
+			}))
+		}
+		s.recordOSINTEvidence(report)
+		return report
+	default:
+		return osint.Report{}
+	}
+}
+
+func (s *Service) applyOSINT(ctx context.Context, domain string, result analysis.Result, report osint.Report, feedRevision string) analysis.Result {
+	if s == nil || s.osint == nil || !report.ShouldBlock {
+		return result
+	}
+	updated := s.osint.Apply(result, report)
+	if updated.Verdict == result.Verdict && updated.Score == result.Score {
+		return updated
+	}
+
+	cacheKey := fmt.Sprintf("safe-road:analysis:%s", domain)
+	err := s.withRedis(ctx, func(redisCtx context.Context) error {
+		return s.redis.SetJSON(redisCtx, cacheKey, analysisCacheEntry{
+			Result:           updated,
+			FeedRevision:     feedRevision,
+			AnalysisRevision: analysisAlgorithmRevision,
+			OSINTCheckedAt:   report.CheckedAt,
+		}, s.ttlFor(updated.Verdict))
+	})
+	if err != nil && !errors.Is(err, cache.ErrDisabled) {
+		logjson.Warn("analysis cache osint write failed", correlation.Fields(ctx, map[string]any{
+			"service": "risk",
+			"domain":  domain,
+			"error":   err.Error(),
+		}))
+	}
+	return updated
+}
+
+func (s *Service) recordOSINTEvidence(report osint.Report) {
+	if s == nil || s.store == nil || !s.store.Enabled() || len(report.Evidence) == 0 {
+		return
+	}
+	expiresAt := report.ExpiresAt
+	if expiresAt == "" {
+		expiresAt = time.Now().Add(6 * time.Hour).UTC().Format(time.RFC3339Nano)
+	}
+	items := make([]store.OSINTEvidence, 0, len(report.Evidence))
+	for _, ev := range report.Evidence {
+		items = append(items, store.OSINTEvidence{
+			Domain:       ev.Domain,
+			SourceURL:    ev.SourceURL,
+			SourceTitle:  ev.SourceTitle,
+			SourceType:   ev.SourceType,
+			Confidence:   ev.Confidence,
+			MatchedTerms: ev.MatchedTerms,
+			RetrievedAt:  ev.RetrievedAt,
+			ExpiresAt:    expiresAt,
+		})
+	}
+	if err := s.store.ReplaceOSINTEvidence(report.Domain, items); err != nil {
+		logjson.Warn("osint evidence store write failed", map[string]any{
+			"service": "risk",
+			"domain":  report.Domain,
+			"error":   err.Error(),
+		})
+	}
 }
 
 // enrichSuspicious runs TLS + WHOIS analysis in parallel for domains in the
@@ -850,6 +974,71 @@ func (s *Service) RedisCache() *cache.Redis {
 		return nil
 	}
 	return s.redis
+}
+
+// OSINT returns the public-evidence lookup service, or nil when disabled.
+func (s *Service) OSINT() *osint.Service {
+	if s == nil {
+		return nil
+	}
+	return s.osint
+}
+
+func (s *Service) OSINTEvidence(ctx context.Context, domain string, force bool) (osint.Report, error) {
+	if s == nil || s.osint == nil || !s.osint.Enabled() {
+		return osint.Report{Domain: domain, Enabled: false}, nil
+	}
+	if !force {
+		if report, ok := s.osint.Cached(ctx, domain); ok {
+			report.CacheHit = true
+			return report, nil
+		}
+		if report, ok := s.storedOSINTEvidence(domain); ok {
+			return report, nil
+		}
+	}
+	return s.osint.Lookup(ctx, domain, force)
+}
+
+func (s *Service) storedOSINTEvidence(domain string) (osint.Report, bool) {
+	if s == nil || s.store == nil || !s.store.Enabled() {
+		return osint.Report{}, false
+	}
+	normalized, err := analysis.NormalizeDomain(domain)
+	if err != nil {
+		return osint.Report{}, false
+	}
+	items, err := s.store.ListOSINTEvidence(normalized, time.Now())
+	if err != nil || len(items) == 0 {
+		return osint.Report{}, false
+	}
+	evidence := make([]osint.Evidence, 0, len(items))
+	for _, item := range items {
+		evidence = append(evidence, osint.Evidence{
+			Domain:       item.Domain,
+			SourceURL:    item.SourceURL,
+			SourceTitle:  item.SourceTitle,
+			SourceType:   item.SourceType,
+			Confidence:   item.Confidence,
+			MatchedTerms: item.MatchedTerms,
+			RetrievedAt:  item.RetrievedAt,
+		})
+	}
+	return osint.Report{
+		Domain:      normalized,
+		Enabled:     true,
+		CacheHit:    true,
+		ShouldBlock: osint.HasStrongWarning(evidence),
+		Evidence:    evidence,
+		CheckedAt:   evidence[0].RetrievedAt,
+		ExpiresAt:   items[0].ExpiresAt,
+		VerdictImpact: func() string {
+			if osint.HasStrongWarning(evidence) {
+				return "escalate_malicious"
+			}
+			return ""
+		}(),
+	}, true
 }
 
 // Whitelist returns the whitelist client.

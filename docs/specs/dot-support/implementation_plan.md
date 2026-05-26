@@ -1,6 +1,6 @@
 # Kế hoạch triển khai: Hỗ trợ DNS-over-TLS (DoT) (Hướng 7)
 
-Bản kế hoạch này mô tả chi tiết phương án thiết kế và triển khai cổng **DNS-over-TLS (DoT)** trên cổng `853` song song với cổng **DNS-over-HTTPS (DoH)** hiện có. Điều này giúp dự án bảo vệ các thiết bị di động (đặc biệt là Android với tính năng Private DNS mặc định) mà không cần cài đặt phần mềm ngoài, tuân thủ tuyệt đối triết lý **Zero-Cost** và **Zero-Configuration**.
+Bản kế hoạch này mô tả chi tiết phương án thiết kế và triển khai cổng **DNS-over-TLS (DoT)** trên cổng `853` song song với cổng **DNS-over-HTTPS (DoH)** hiện có. Điều này giúp dự án bảo vệ các thiết bị di động (đặc biệt là Android với tính năng Private DNS mặc định) mà không cần cài đặt phần mềm ngoài, tuân thủ triết lý **Zero-Cost** cho vận hành và **Zero-Configuration** cho local/dev khi không cấu hình chứng chỉ thật.
 
 ---
 
@@ -8,7 +8,7 @@ Bản kế hoạch này mô tả chi tiết phương án thiết kế và triể
 
 > [!IMPORTANT]
 > **Tự động sinh chứng chỉ tự ký (Self-Signed Certificates):**
-> Nhằm đơn giản hóa quá trình phát triển cục bộ và đảm bảo dịch vụ khởi chạy tức thì mà không bị crash, kế hoạch đề xuất giải pháp sinh chứng chỉ TLS tự ký trực tiếp trên RAM nếu không có chứng chỉ thật được cấu hình.
+> Nhằm đơn giản hóa quá trình phát triển cục bộ, hệ thống sinh chứng chỉ TLS tự ký trực tiếp trên RAM khi không có chứng chỉ thật được cấu hình. Nếu người vận hành đã cấu hình cert/key nhưng file lỗi, thiếu, hoặc không đọc được, `dns-resolver` fail fast thay vì âm thầm fallback sang self-signed.
 >
 > **Không chiếm quyền Root ở Local (Cổng 8533 làm mặc định khi Dev):**
 > Ở các hệ điều hành Unix/Linux, các cổng `< 1024` yêu cầu quyền root. Để phát triển và kiểm thử ở local dễ dàng, mặc định chúng ta sẽ chạy cổng DoT trên cổng tùy biến `:8533` (hoặc cổng cấu hình `.env` `SAFE_ROAD_DNS_DOT_ADDR`), và chỉ chạy trên cổng `:853` thực tế khi triển khai Docker/Production.
@@ -32,12 +32,12 @@ Thực hiện cập nhật và cấu hình để chạy song song server DoT và
 -   **Khởi chạy `main()`:**
     -   Tải các biến cấu hình từ môi trường (`SAFE_ROAD_DNS_DOT_ENABLED`, `SAFE_ROAD_DNS_DOT_ADDR`, `SAFE_ROAD_DNS_DOT_CERT_FILE`, `SAFE_ROAD_DNS_DOT_KEY_FILE`, `SAFE_ROAD_RATELIMIT_DOT_RPM`, `SAFE_ROAD_RATELIMIT_DOT_BURST`).
     -   Khởi tạo `dotLimiter` nếu rate limiting được bật.
-    -   Tạo TLS Config. Load chứng chỉ thật từ đường dẫn, hoặc tự sinh Self-Signed Certificate nếu đường dẫn rỗng hoặc file lỗi nhờ hàm helper `generateSelfSignedCert`.
+    -   Tạo TLS Config. Load chứng chỉ thật từ đường dẫn; nếu đường dẫn cert/key được cấu hình nhưng load lỗi thì ghi log lỗi và thoát. Chỉ tự sinh Self-Signed Certificate khi cert/key không được cấu hình.
     -   Khởi chạy server HTTP DoH và server DoT song song bằng goroutine.
     -   Bắt tín hiệu `SIGINT/SIGTERM` để shutdown graceful cả hai server.
 -   **Hàm `dotHandler(w dns.ResponseWriter, r *dns.Msg)`:** Nhận truy vấn DoT, kiểm tra Rate Limit, kiểm tra chính sách block/allow, forward tới upstream bằng DoH và trả lời client.
 -   **Hàm helper `generateSelfSignedCert() (tls.Certificate, error)`:** Sinh chứng chỉ SSL tự ký 2048-bit RSA tạm thời trực tiếp trên RAM.
--   **Hàm `blockedDNSMessage(query *dns.Msg) (*dns.Msg, error)`:** Dịch chuyển logic tạo message DNS block từ byte thô của DoH sang đối tượng `dns.Msg` của DoT.
+-   **Hàm `blockedDNSMessage(query *dns.Msg) (*dns.Msg, error)`:** Dịch chuyển logic tạo message DNS block từ byte thô của DoH sang đối tượng `dns.Msg` của DoT, đồng thời áp dụng `sinkhole`, `nxdomain`, `refused`, hoặc `nullip`.
 -   **Hàm `sendServfail(w dns.ResponseWriter, r *dns.Msg)`:** Đóng gói gửi phản hồi ServFail.
 
 #### [MODIFY] [main_test.go](file:///d:/Go/duan/safe-road/cmd/dns-resolver/main_test.go)
@@ -89,3 +89,4 @@ Thực hiện cập nhật và cấu hình để chạy song song server DoT và
     kdig @127.0.0.1 -p 8533 +tls -v bocongan-verify.xyz
     ```
 -   Kiểm tra xem tên miền cảnh báo có lập tức trả về IP trang block page của hệ thống hay không.
+-   Kiểm tra thêm các chiến lược chặn DNS bằng `SAFE_ROAD_DNS_BLOCK_STRATEGY=sinkhole|nxdomain|refused|nullip`.

@@ -34,10 +34,20 @@ Turn the current local-first Safe Road stack into a production-capable, low-cost
 - Feed sync must be covered by tests for dry-run, gzip sources, and Redis writes.
 - The full repository must continue to pass `go test ./...` and `go build ./...`.
 
+### Milestone 5: Production Readiness Sync
+
+- Operators must have a reproducible local HTTP/DoH load-test CLI for cache-hit, cache-miss, concurrency, rate-limit, and latency-summary runs.
+- Backup/restore helpers must cover Redis RDB, SQLite hot backups, `.env` snapshots, Caddy config snapshots, and optional `rclone` offsite upload.
+- Public-edge checks must be scriptable for intended ports and smoke checks before production release.
+- Configured DoT TLS certificate/key failures must fail fast instead of silently falling back to self-signed certificates.
+- DNS blocking behavior must be configurable between `sinkhole`, `nxdomain`, `refused`, and `nullip`.
+- Panic recovery metrics must be observed exactly once per recovered HTTP panic.
+
 ## Functional Requirements
 
 - `/metrics` must be available on `core-api` and `dns-resolver`.
 - `cmd/feed-sync` and `cmd/feed-syncd` must share the same sync implementation.
+- `cmd/load-test` must support HTTP API and DoH load paths with latency/error summaries.
 - `docker-compose.yml` must support the optional feed sync daemon without forcing it on local development.
 - Existing API response shapes and DNS behavior must stay compatible.
 

@@ -828,21 +828,21 @@ doh.safe-road.example.com {
 ### Phase 2: Security Hardening (2-4 tuần)
 - [ ] Implement TLS cho production (Caddy reverse proxy)
 - [ ] Thêm input validation (IDN, punycode, length limits)
-- [ ] Thêm rate limiting trên API và DoH endpoints
-- [ ] Implement secrets management (Docker secrets hoặc file-based)
+- [x] Thêm rate limiting trên API và DoH endpoints
+- [x] Implement secrets management (Docker secrets hoặc file-based)
 
 ### Phase 3: Detection Enhancement (1-2 tháng)
 - [ ] Thêm URL path analysis
-- [ ] Thêm WHOIS/DNS record analysis
+- [x] Thêm WHOIS/DNS record analysis
 - [ ] Thêm local in-memory cache (ristretto)
-- [ ] Implement cache invalidation khi threat feed update
+- [x] Implement cache invalidation khi threat feed update
 
 ### Phase 4: Production Readiness (2-3 tháng)
-- [ ] OpenAPI/Swagger documentation
+- [x] OpenAPI/Swagger documentation
 - [ ] Distributed tracing (OpenTelemetry)
 - [ ] Alerting rules (Prometheus Alertmanager)
-- [ ] Runbooks và incident response procedures
-- [ ] Load testing và performance benchmarking
+- [x] Runbooks và incident response procedures
+- [x] Load testing script; production VPS benchmarking remains to be recorded
 
 ---
 

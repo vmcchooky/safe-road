@@ -14,6 +14,7 @@ import (
 	"safe-road/internal/auth"
 	"safe-road/internal/config"
 	"safe-road/internal/observability"
+	"safe-road/internal/osint"
 	"safe-road/internal/risk"
 	"safe-road/internal/serve"
 	"safe-road/internal/store"
@@ -113,6 +114,80 @@ func TestAnalyzeEndpointStillWorks(t *testing.T) {
 	}
 	if payload["domain"] == "" {
 		t.Fatal("expected domain in response")
+	}
+}
+
+func TestAnalyzeEndpointDetectsVietnamPublicServiceAbuse(t *testing.T) {
+	app := &app{risk: risk.NewService(risk.Options{AnalysisConfig: config.DefaultAnalysisConfig(), RedisTimeout: 10 * time.Millisecond}), metrics: observability.NewRegistry(), deploymentTier: "budget-vps"}
+	defer func() {
+		if err := app.risk.Close(); err != nil {
+			t.Fatal(err)
+		}
+	}()
+
+	recorder := httptest.NewRecorder()
+	request := httptest.NewRequest(http.MethodGet, "/v1/analyze?domain=dichvucong-vn.com", nil)
+
+	app.analyzeHandler(recorder, request)
+
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", recorder.Code)
+	}
+
+	var payload map[string]any
+	if err := json.NewDecoder(recorder.Body).Decode(&payload); err != nil {
+		t.Fatal(err)
+	}
+	if payload["verdict"] != "MALICIOUS" {
+		t.Fatalf("expected malicious verdict, got %#v", payload["verdict"])
+	}
+}
+
+func TestAnalyzeEndpointIncludesOSINTEvidence(t *testing.T) {
+	source := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`<title>Cảnh báo giả mạo</title>baohiem-online.com là website giả mạo, lừa đảo.`))
+	}))
+	defer source.Close()
+
+	app := &app{
+		risk: risk.NewService(risk.Options{
+			AnalysisConfig: config.DefaultAnalysisConfig(),
+			RedisTimeout:   10 * time.Millisecond,
+			OSINT: osint.NewService(osint.Options{
+				Enabled:             true,
+				Sources:             []string{source.URL},
+				TrustedDomains:      []string{source.URL},
+				AllowPrivateSources: true,
+				CacheTTL:            time.Hour,
+			}),
+		}),
+		metrics:        observability.NewRegistry(),
+		deploymentTier: "budget-vps",
+	}
+	defer func() {
+		if err := app.risk.Close(); err != nil {
+			t.Fatal(err)
+		}
+	}()
+
+	recorder := httptest.NewRecorder()
+	request := httptest.NewRequest(http.MethodGet, "/v1/analyze?domain=baohiem-online.com&include_evidence=1", nil)
+	app.analyzeHandler(recorder, request)
+
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", recorder.Code)
+	}
+
+	var payload map[string]any
+	if err := json.NewDecoder(recorder.Body).Decode(&payload); err != nil {
+		t.Fatal(err)
+	}
+	if payload["verdict"] != "MALICIOUS" {
+		t.Fatalf("expected malicious verdict, got %#v", payload["verdict"])
+	}
+	evidence, ok := payload["evidence"].([]any)
+	if !ok || len(evidence) == 0 {
+		t.Fatalf("expected evidence array, got %#v", payload["evidence"])
 	}
 }
 

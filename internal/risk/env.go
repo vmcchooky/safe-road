@@ -6,6 +6,7 @@ import (
 	"safe-road/internal/cache"
 	"safe-road/internal/config"
 	"safe-road/internal/logjson"
+	"safe-road/internal/osint"
 	"safe-road/internal/store"
 )
 
@@ -40,6 +41,17 @@ func NewServiceFromEnv() *Service {
 		})
 	}
 
+	osintService := osint.NewService(osint.Options{
+		Enabled:        config.Bool("SAFE_ROAD_OSINT_ENABLED", false),
+		Mode:           config.String("SAFE_ROAD_OSINT_MODE", "background_on_demand"),
+		Timeout:        config.DurationMillis("SAFE_ROAD_OSINT_TIMEOUT_MS", 2*time.Second),
+		CacheTTL:       config.DurationSeconds("SAFE_ROAD_OSINT_CACHE_TTL_SECONDS", 6*time.Hour),
+		TrustedDomains: osint.SplitList(config.String("SAFE_ROAD_OSINT_TRUSTED_DOMAINS", "")),
+		Sources:        osint.SplitList(config.String("SAFE_ROAD_OSINT_SOURCES", "")),
+		Redis:          redisCache,
+		RedisTimeout:   config.DurationMillis("SAFE_ROAD_REDIS_TIMEOUT_MS", 250*time.Millisecond),
+	})
+
 	return NewService(Options{
 		Redis:          redisCache,
 		RedisTimeout:   config.DurationMillis("SAFE_ROAD_REDIS_TIMEOUT_MS", 250*time.Millisecond),
@@ -61,5 +73,6 @@ func NewServiceFromEnv() *Service {
 		Store:          storeDB,
 		EnrichEnabled:  config.Bool("SAFE_ROAD_ENRICH_ENABLED", true),
 		EnrichTimeout:  config.DurationMillis("SAFE_ROAD_ENRICH_TIMEOUT_MS", 3*time.Second),
+		OSINT:          osintService,
 	})
 }
