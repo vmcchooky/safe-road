@@ -1,3 +1,4 @@
+⚠️ **THÔNG BÁO:** Dự án này không còn được duy trì. Hãy sử dụng [Repo Mới tại đây](https://github.com/vmcchooky/safe-zone).
 # Safe Road
 
 Safe Road is a zero-cost-first anti-phishing system whose default deployment target is a single budget VPS, with local-friendly Go services for development and validation.
